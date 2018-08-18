@@ -19,29 +19,30 @@ Contributions / Pull requests are welcome.
 ### Create connection
 A new connection can pe created using the NewConnection function
 ```
-  hl:=make(lra.HeaderList)
-  hl["Content-Type"]="application/json"
-  connection,err :=lra.NewConnection(true,                             // use SSL
-                                     "elasticsearch.example.com",      // server name
-									  9200,                             // port
-									  "",                               // no additional base endpoint
-									  "admin",                          // user name
-									  "1234",                           // password
-									  false,                            // we use a certificate generatewd by the elasticsearch CA
-									  "https://proxy.example.com:3128", // We use a proxy
-									  false,                            // it is not a socks5 proxy
-									  hl                                // We want to pass those headers
-									)
+	hl := make(lra.HeaderList)
+	hl["Content-Type"] = "application/json"
+	connection,err := lra.NewConnection(
+		true,                             // use SSL
+		"elasticsearch.example.com",      // server name
+		9200,                             // port
+		"",                               // no additional base endpoint
+		"admin",                          // user name
+		"1234",                           // password
+		false,                            // we use a certificate generatewd by the elasticsearch CA
+		"https://proxy.example.com:3128", // We use a proxy
+		false,                            // it is not a socks5 proxy
+		hl                                // We want to pass those headers
+	)
 ```
 ### Get a result
 Getting a raw []byte:
 ```
-  statusRaw,err:=connection.Get("/_cluster/health")
+  statusRaw,err := connection.Get("/_cluster/health")
 ```
 
 Getting parsed JSON:
 ```
-  statusJson,err:=connection.GetJSON("/_cluster/health")
+  statusJson,err := connection.GetJSON("/_cluster/health")
 ```
 
 ### Other API functions
