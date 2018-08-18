@@ -17,7 +17,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// Key-value list of headers to set on every request. Used when declaring the connection.
+// HeaderList is a key-value list of headers to set on every request. Used when declaring the connection.
 type HeaderList map[string]string
 
 // The Connection object stores all the information needed to handle requests.
@@ -75,11 +75,11 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 			}
 			tr.Dial = dialer.Dial
 		} else {
-			proxyUrl, err := url.Parse(Proxy)
+			proxyURL, err := url.Parse(Proxy)
 			if err != nil {
 				return nil, err
 			}
-			tr.Proxy = http.ProxyURL(proxyUrl)
+			tr.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
 	connection.Client = &http.Client{
@@ -157,6 +157,7 @@ func (connection *Connection) Connect(endpoint string) ([]byte, error) {
 	return connection.request("CONNECT", endpoint, x)
 }
 
+// ConnectJSON issues a HTTP Connect request, parses the resulting data as JSON and returns the parse results.
 func (connection *Connection) ConnectJSON(endpoint string) (map[string]interface{}, error) {
 	var x []byte
 

@@ -14,6 +14,9 @@ BSD 3-clause license
 ## Contributions
 Contributions / Pull requests are welcome. 
 
+## Documentation
+[![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra)
+
 ## Usage
 
 ### Create connection
