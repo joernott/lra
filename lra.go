@@ -90,9 +90,6 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 	} else {
 		connection.Protocol = "http"
 	}
-	if BaseEndpoint == "" {
-		BaseEndpoint = "/engine-rest"
-	}
 	connection.BaseURL = connection.Protocol + "://"
 	connection.Server = Server
 	connection.Port = Port
