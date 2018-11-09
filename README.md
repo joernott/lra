@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.com/joernott/lra.svg?branch=master)](https://travis-ci.org/joernott/lra) [![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra) [![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra)
+
 # lra - a lowlevel REST api client
 
 This package handles REST API calls and allows for using http and socks proxies
@@ -8,8 +10,6 @@ I wrote this after copying code for various tools connecting to different REST
 APIs. It consolidates the low level functionality of establishing/configuring
 a connction and doing the HTTP requests.
 
-[![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra)
-
 ## License
 BSD 3-clause license
 
@@ -17,7 +17,7 @@ BSD 3-clause license
 Contributions / Pull requests are welcome. 
 
 ## Documentation
-[![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra)
+[https://godoc.org/github.com/joernott/lra](https://godoc.org/github.com/joernott/lra)
 
 ## Usage
 
