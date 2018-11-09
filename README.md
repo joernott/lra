@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.com/joernott/lra.svg?branch=master)](https://travis-ci.org/joernott/lra) [![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra) [![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra)
+[![Build Status](https://travis-ci.com/joernott/lra.svg?branch=master)](https://travis-ci.org/joernott/lra) [![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra) [![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra) [![license](https://img.shields.io/badge/license-BSD%203--clause-blue.svg)](https://github.com/joernott/lra/LICENSE)
 
 # lra - a lowlevel REST api client
 
