@@ -8,6 +8,8 @@ I wrote this after copying code for various tools connecting to different REST
 APIs. It consolidates the low level functionality of establishing/configuring
 a connction and doing the HTTP requests.
 
+[![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra)
+
 ## License
 BSD 3-clause license
 
