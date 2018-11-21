@@ -110,6 +110,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 func (connection *Connection) request(method string, endpoint string, jsonData []byte) ([]byte, error) {
 	var req *http.Request
 	var err error
+	var response []byte
 
 	target := connection.BaseURL + endpoint
 	switch method {
@@ -131,7 +132,11 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 		return nil, err
 	}
 	defer r.Body.Close()
-	response, err := ioutil.ReadAll(r.Body)
+	if method != "HEAD" {
+		response, err = ioutil.ReadAll(r.Body)
+	} else {
+		response, err = json.Marshal(r.Header)
+	}
 	if err != nil {
 		return nil, err
 	}
