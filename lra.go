@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -132,13 +133,17 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 		return nil, err
 	}
 	defer r.Body.Close()
-	if method != "HEAD" {
-		response, err = ioutil.ReadAll(r.Body)
+	if r.StatusCode >399 {
+		return []byte(""), errors.New(r.Status)
 	} else {
-		response, err = json.Marshal(r.Header)
-	}
-	if err != nil {
-		return nil, err
+		if method != "HEAD" {
+			response, err = ioutil.ReadAll(r.Body)
+		} else {
+			response, err = json.Marshal(r.Header)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return response, nil
 }
