@@ -28,10 +28,10 @@ type ReturnData struct {
 }
 
 type TestServer struct {
-	Server *httptest.Server
-	Host   string
-	Port   int
-	SSL    bool
+	Server   *httptest.Server
+	Host     string
+	Port     int
+	SSL      bool
 	Protocol string
 }
 
@@ -123,7 +123,8 @@ func TestMain(m *testing.M) {
 	router.HEAD("/base/*path", urlParamFunc)
 	router.OPTIONS("/base/*path", urlParamFunc)
 	router.PATCH("/base/*path", contentDataFunc)
-	router.Handle("TRACE", "/base/*path", urlParamFunc) 
+	router.Handle("TRACE", "/base/*path", urlParamFunc)
+	router.Handle("CONNECT", "/base/*path", urlParamFunc)
 
 	HL = make(HeaderList)
 	HL["test-header"] = "test"
@@ -143,10 +144,10 @@ func TestMain(m *testing.M) {
 	}
 
 	TestServers[0] = TestServer{
-		Server: server,
-		Host:   host,
-		Port:   port,
-		SSL:    false,
+		Server:   server,
+		Host:     host,
+		Port:     port,
+		SSL:      false,
 		Protocol: "http",
 	}
 
@@ -164,11 +165,11 @@ func TestMain(m *testing.M) {
 		os.Exit(10)
 	}
 	TestServers[1] = TestServer{
-		Server: httpsserver,
-		Host:   host,
-		Port:   port,
-		SSL:    true,
-		Protocol : "https",
+		Server:   httpsserver,
+		Host:     host,
+		Port:     port,
+		SSL:      true,
+		Protocol: "https",
 	}
 
 	flag.Parse()
@@ -186,47 +187,130 @@ func TestNewConnection_HTTP(t *testing.T) {
 			t.Fatalf("Error creating connection")
 		}
 		if connection.Protocol != server.Protocol {
-			t.Errorf("Expected Protocol %v, got %v instead.", server.Protocol, connection.Protocol)
+			t.Errorf("Expected Protocol '%v', got '%v' instead.", server.Protocol, connection.Protocol)
 		}
 		if connection.Server != server.Host {
-			t.Errorf("Expected Server to be %v, got %v instead.", server.Host, connection.Server)
+			t.Errorf("Expected Server to be '%v', got '%v' instead.", server.Host, connection.Server)
 		}
 
 		if connection.Port != server.Port {
-			t.Errorf("Expected Port to be %v, got %v instead.", server.Port, connection.Port)
+			t.Errorf("Expected Port to be '%v', got '%v' instead.", server.Port, connection.Port)
 		}
 
 		if connection.BaseEndpoint != "/base" {
-			t.Errorf("Expected BaseEndpoint to be /base, got %v instead.", connection.BaseEndpoint)
+			t.Errorf("Expected BaseEndpoint to be '/base', got '%v' instead.", connection.BaseEndpoint)
 		}
 
 		if connection.User != "" {
-			t.Errorf("Expected User to be '', got %v instead.", connection.User)
+			t.Errorf("Expected User to be '', got '%v' instead.", connection.User)
 		}
 
 		if connection.Password != "" {
-			t.Errorf("Expected Password to be '', got %v instead.", connection.Password)
+			t.Errorf("Expected Password to be '', got '%v' instead.", connection.Password)
 		}
 
 		if connection.ValidateSSL {
-			t.Errorf("Expected ValidateSSL to be false got %v instead.", connection.ValidateSSL)
+			t.Errorf("Expected ValidateSSL to be false got '%v' instead.", connection.ValidateSSL)
 		}
 
 		if connection.Proxy != "" {
-			t.Errorf("Expected proxy to be '', got %v instead.", connection.Proxy)
+			t.Errorf("Expected proxy to be '', got '%v' instead.", connection.Proxy)
 		}
 
 		if connection.ProxyIsSocks {
-			t.Errorf("Expected ProxyIsSocks to be false got %v instead.", connection.ProxyIsSocks)
+			t.Errorf("Expected ProxyIsSocks to be false got '%v' instead.", connection.ProxyIsSocks)
 		}
 
 		if connection.SendHeaders["test-header"] != "test" {
-			t.Errorf("Expected test-header to be 'test', got %v instead.", connection.SendHeaders["test-header"])
+			t.Errorf("Expected test-header to be 'test', got '%v' instead.", connection.SendHeaders["test-header"])
 		}
 		cu := server.Server.URL + "/base"
 		if connection.BaseURL != cu {
-			t.Errorf("Expected BaseEndpoint to be /base, got %v instead.", connection.BaseURL)
+			t.Errorf("Expected BaseEndpoint to be '%v', got '%v' instead.", cu, connection.BaseURL)
 		}
+	}
+}
+
+func TestNewConnection_User(t *testing.T) {
+	for _, server := range TestServers {
+		user := "admin"
+		password := "123456"
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", user, password, false, "", false, HL)
+		if err != nil {
+			t.Fatalf("Error creating connection")
+		}
+
+		if connection.User != user {
+			t.Errorf("Expected User to be '%v', got '%v' instead.", user, connection.User)
+		}
+
+		if connection.Password != password {
+			t.Errorf("Expected Password to be '%v', got '%v' instead.", password, connection.Password)
+		}
+
+		cu := server.Protocol + "://" + user + ":" + password + "@" + server.Host + ":" + strconv.Itoa(server.Port) + "/base"
+		if connection.BaseURL != cu {
+			t.Errorf("Expected BaseEndpoint to be '%v', got '%v' instead.", cu, connection.BaseURL)
+		}
+	}
+}
+
+func TestNewConnection_HTTPProxy(t *testing.T) {
+	httpproxy := "http://proxy.example.com:3128"
+	for _, server := range TestServers {
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, httpproxy, false, HL)
+		if err != nil {
+			t.Fatalf("Error creating connection")
+		}
+		if connection.Proxy != httpproxy {
+			t.Errorf("Expected proxy to be '%v', got '%v' instead.", httpproxy, connection.Proxy)
+		}
+
+		if connection.ProxyIsSocks {
+			t.Errorf("Expected ProxyIsSocks to be false got '%v' instead.", connection.ProxyIsSocks)
+		}
+	}
+}
+
+func TestNewConnection_SocksProxy(t *testing.T) {
+	socksproxy := "socks.example.com:8181"
+	for _, server := range TestServers {
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, socksproxy, true, HL)
+		if err != nil {
+			t.Fatalf("Error creating connection")
+		}
+		if connection.Proxy != socksproxy {
+			t.Errorf("Expected proxy to be '%v', got '%v' instead.", socksproxy, connection.Proxy)
+		}
+
+		if !connection.ProxyIsSocks {
+			t.Errorf("Expected ProxyIsSocks to be true got '%v' instead.", connection.ProxyIsSocks)
+		}
+
+	}
+}
+
+func TestConnect_OK(t *testing.T) {
+	for _, server := range TestServers {
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		if err != nil {
+			t.Fatalf("Error creating connection: %v", err.Error())
+		}
+		ep := "/test?stringdata=hello&intdata=42&booldata=true"
+		b, err := connection.Connect(ep)
+		checkRawResults(server, b, err, "CONNECT", t)
+	}
+}
+
+func TestConnectJSON_OK(t *testing.T) {
+	for _, server := range TestServers {
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		if err != nil {
+			t.Fatalf("Error creating connection: %v", err.Error())
+		}
+		ep := "/test?stringdata=hello&intdata=42&booldata=true"
+		data, err := connection.ConnectJSON(ep)
+		checkJSONResults(server, data, err, "CONNECT", t)
 	}
 }
 
@@ -238,7 +322,7 @@ func TestDelete_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		b, err := connection.Delete(ep)
-		checkRawResults(server,b,err,"DELETE",t)
+		checkRawResults(server, b, err, "DELETE", t)
 	}
 }
 
@@ -250,7 +334,7 @@ func TestDeleteJSON_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		data, err := connection.DeleteJSON(ep)
-		checkJSONResults(server, data, err, "DELETE",t)
+		checkJSONResults(server, data, err, "DELETE", t)
 	}
 }
 
@@ -262,7 +346,7 @@ func TestGet_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		b, err := connection.Get(ep)
-		checkRawResults(server,b,err,"GET",t)
+		checkRawResults(server, b, err, "GET", t)
 	}
 }
 
@@ -274,7 +358,7 @@ func TestGetJSON_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		data, err := connection.GetJSON(ep)
-		checkJSONResults(server, data, err, "GET",t)
+		checkJSONResults(server, data, err, "GET", t)
 	}
 }
 
@@ -312,12 +396,12 @@ func TestHeadJSON_OK(t *testing.T) {
 		if err != nil {
 			t.Errorf("Error creating connection: %v", err.Error())
 		}
-	
+
 		if data, ok := hdr["Content-Length"].([]interface{}); ok {
-			if s,ok:=data[0].(string); ok {
-				i,err:=strconv.Atoi(s)
+			if s, ok := data[0].(string); ok {
+				i, err := strconv.Atoi(s)
 				if err != nil {
-					t.Errorf("Conbtent-Length is not a number: %v",s)
+					t.Errorf("Conbtent-Length is not a number: %v", s)
 				} else {
 					if i <= 100 {
 						t.Errorf("Wrong Content-Length, expected >100, got %v", data[0])
@@ -347,7 +431,7 @@ func TestOptions_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		b, err := connection.Options(ep)
-		checkRawResults(server,b,err,"OPTIONS",t)
+		checkRawResults(server, b, err, "OPTIONS", t)
 	}
 }
 
@@ -359,21 +443,21 @@ func TestOptionsJSON_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		data, err := connection.OptionsJSON(ep)
-		checkJSONResults(server, data, err, "OPTIONS",t)
+		checkJSONResults(server, data, err, "OPTIONS", t)
 	}
 }
 
 func TestPatch_OK(t *testing.T) {
 	for _, server := range TestServers {
 		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
-	
+
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		b, err := connection.Patch(ep, in)
-		checkRawResults(server,b,err,"PATCH",t)
+		checkRawResults(server, b, err, "PATCH", t)
 	}
 }
 
@@ -386,7 +470,7 @@ func TestPatchJSON_OK(t *testing.T) {
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		data, err := connection.PatchJSON(ep, in)
-		checkJSONResults(server, data, err, "PATCH",t)
+		checkJSONResults(server, data, err, "PATCH", t)
 	}
 }
 
@@ -399,7 +483,7 @@ func TestPost_OK(t *testing.T) {
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		b, err := connection.Post(ep, in)
-		checkRawResults(server,b,err,"POST",t)
+		checkRawResults(server, b, err, "POST", t)
 	}
 }
 
@@ -412,7 +496,7 @@ func TestPostJSON_OK(t *testing.T) {
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		data, err := connection.PostJSON(ep, in)
-		checkJSONResults(server, data, err, "POST",t)
+		checkJSONResults(server, data, err, "POST", t)
 	}
 }
 
@@ -425,7 +509,7 @@ func TestPut_OK(t *testing.T) {
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		b, err := connection.Put(ep, in)
-		checkRawResults(server,b,err,"PUT",t)
+		checkRawResults(server, b, err, "PUT", t)
 	}
 }
 
@@ -438,7 +522,7 @@ func TestPutJSON_OK(t *testing.T) {
 		ep := "/test"
 		in := []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 		data, err := connection.PutJSON(ep, in)
-		checkJSONResults(server, data, err, "PUT",t)
+		checkJSONResults(server, data, err, "PUT", t)
 	}
 }
 
@@ -450,7 +534,7 @@ func TestTrace_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		b, err := connection.Trace(ep)
-		checkRawResults(server,b,err,"TRACE",t)
+		checkRawResults(server, b, err, "TRACE", t)
 	}
 }
 
@@ -462,11 +546,11 @@ func TestTraceJSON_OK(t *testing.T) {
 		}
 		ep := "/test?stringdata=hello&intdata=42&booldata=true"
 		data, err := connection.TraceJSON(ep)
-		checkJSONResults(server, data, err, "TRACE",t)
+		checkJSONResults(server, data, err, "TRACE", t)
 	}
 }
 
-func checkJSONResults(server TestServer, data map[string]interface{}, err error, method string, t *testing.T ) {
+func checkJSONResults(server TestServer, data map[string]interface{}, err error, method string, t *testing.T) {
 	if err != nil {
 		t.Errorf("Error creating connection: %v", err.Error())
 	}
@@ -522,17 +606,17 @@ func checkJSONResults(server TestServer, data map[string]interface{}, err error,
 
 }
 
-func checkRawResults(server TestServer, raw []byte, err error, method string, t *testing.T){
+func checkRawResults(server TestServer, raw []byte, err error, method string, t *testing.T) {
 	if err != nil {
 		t.Errorf("Error creating connection: %v", err.Error())
 	}
-	expected := `{"method":"`+method+`","protocol":"`+server.Protocol+`","path":"/test","header":{"Accept-Encoding":\["gzip"\],.*"Test-Header":\["test"\],"User-Agent":\["Go-http-client/1.1"\]},"stringdata":"hello","intdata":42,"booldata":true,"error":""}`
+	expected := `{"method":"` + method + `","protocol":"` + server.Protocol + `","path":"/test","header":{"Accept-Encoding":\["gzip"\],.*"Test-Header":\["test"\],"User-Agent":\["Go-http-client/1.1"\]},"stringdata":"hello","intdata":42,"booldata":true,"error":""}`
 	ok, err := regexp.Match(expected, raw)
 	if err != nil {
-		t.Fatalf("Regexp parse error in %v: %v",method, err.Error())
+		t.Fatalf("Regexp parse error in %v: %v", method, err.Error())
 	} else {
 		if !ok {
-			t.Errorf("Wrong %v result, expected '%v', got '%v'",method, expected, string(raw[:]))
+			t.Errorf("Wrong %v result, expected '%v', got '%v'", method, expected, string(raw[:]))
 		}
 	}
 }
