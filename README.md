@@ -1,5 +1,4 @@
-[![Build Status](https://travis-ci.com/joernott/lra.svg?branch=master)](https://travis-ci.org/joernott/lra) [![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra) [![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra) [![license](https://img.shields.io/badge/license-BSD%203--clause-blue.svg)](https://github.com/joernott/lra/LICENSE)
-
+[![Build Status](https://travis-ci.com/joernott/lra.svg?branch=master)](https://travis-ci.org/joernott/lra) [![Go Report Card](https://goreportcard.com/badge/joernott/lra)](https://goreportcard.com/report/joernott/lra) [![GoDoc](https://godoc.org/github.com/joernott/lra?status.svg)](https://godoc.org/github.com/joernott/lra) [![license](https://img.shields.io/badge/license-BSD%203--clause-blue.svg)](https://github.com/joernott/lra/LICENSE) [![cover.run](https://cover.run/go/github.com/joernott/lra.svg?style=flat&tag=golang-1.10)](https://cover.run/go?tag=golang-1.10&repo=github.com%2Fjoernott%2Flra)
 # lra - a lowlevel REST api client
 
 This package handles REST API calls and allows for using http and socks proxies
