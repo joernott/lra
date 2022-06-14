@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"strconv"
 	"time"
-
 	"golang.org/x/net/proxy"
 )
 
@@ -135,15 +134,14 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 	defer r.Body.Close()
 	if r.StatusCode >399 {
 		return []byte(""), errors.New(r.Status)
+	}
+	if method != "HEAD" {
+		response, err = ioutil.ReadAll(r.Body)
 	} else {
-		if method != "HEAD" {
-			response, err = ioutil.ReadAll(r.Body)
-		} else {
-			response, err = json.Marshal(r.Header)
-		}
-		if err != nil {
-			return nil, err
-		}
+		response, err = json.Marshal(r.Header)
+	}
+	if err != nil {
+		return nil, err
 	}
 	return response, nil
 }

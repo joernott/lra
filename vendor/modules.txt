@@ -1,0 +1,7 @@
+# github.com/julienschmidt/httprouter v1.3.0
+## explicit
+github.com/julienschmidt/httprouter
+# golang.org/x/net v0.0.0-20220607020251-c690dde0001d
+## explicit
+golang.org/x/net/internal/socks
+golang.org/x/net/proxy
