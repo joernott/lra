@@ -9,12 +9,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"golang.org/x/net/proxy"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
-	"golang.org/x/net/proxy"
 )
 
 // HeaderList is a key-value list of headers to set on every request. Used when declaring the connection.
@@ -132,7 +132,7 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 		return nil, err
 	}
 	defer r.Body.Close()
-	if r.StatusCode >399 {
+	if r.StatusCode > 399 {
 		return []byte(""), errors.New(r.Status)
 	}
 	if method != "HEAD" {

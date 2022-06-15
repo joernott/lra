@@ -42,6 +42,7 @@ const epurl = "/test?stringdata=hello&intdata=42&booldata=true"
 const ep404 = "/error/404?stringdata=hello&intdata=42&booldata=true"
 const epjson = "/error/json?stringdata=hello&intdata=42&booldata=true"
 const epin = "/test"
+
 var indata = []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 
 func urlParamFunc(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
@@ -81,12 +82,14 @@ func urlParamFunc(w http.ResponseWriter, r *http.Request, params httprouter.Para
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
-	p:=strings.Split(params.ByName("path"),"/")
-	if len(p) >=3 {
-		if p[1] =="error" {
-			switch(p[2]) {
-				case "404" : w.WriteHeader(http.StatusNotFound)
-				case "json": body = []byte("{{")
+	p := strings.Split(params.ByName("path"), "/")
+	if len(p) >= 3 {
+		if p[1] == "error" {
+			switch p[2] {
+			case "404":
+				w.WriteHeader(http.StatusNotFound)
+			case "json":
+				body = []byte("{{")
 			}
 		}
 	}
@@ -122,13 +125,15 @@ func contentDataFunc(w http.ResponseWriter, r *http.Request, params httprouter.P
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
-	p:=strings.Split(params.ByName("path"),"/")
-	if len(p) >=3 {
-		if p[1] =="error" {
-			switch(p[2]) {
-				case "404" : w.WriteHeader(http.StatusNotFound)
-							 return
-				case "json": body = []byte("{{")
+	p := strings.Split(params.ByName("path"), "/")
+	if len(p) >= 3 {
+		if p[1] == "error" {
+			switch p[2] {
+			case "404":
+				w.WriteHeader(http.StatusNotFound)
+				return
+			case "json":
+				body = []byte("{{")
 			}
 		}
 	}
