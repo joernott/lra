@@ -9,12 +9,13 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"golang.org/x/net/proxy"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // HeaderList is a key-value list of headers to set on every request. Used when declaring the connection.
@@ -110,6 +111,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 func (connection *Connection) request(method string, endpoint string, jsonData []byte) ([]byte, error) {
 	var req *http.Request
 	var err error
+	var err2 error
 	var response []byte
 
 	target := connection.BaseURL + endpoint
@@ -132,16 +134,17 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 		return nil, err
 	}
 	defer r.Body.Close()
-	if r.StatusCode > 399 {
-		return []byte(""), errors.New(r.Status)
-	}
+
 	if method != "HEAD" {
-		response, err = ioutil.ReadAll(r.Body)
+		response, err2 = ioutil.ReadAll(r.Body)
 	} else {
-		response, err = json.Marshal(r.Header)
+		response, err2 = json.Marshal(r.Header)
 	}
-	if err != nil {
-		return nil, err
+	if err2 != nil {
+		return nil, err2
+	}
+	if r.StatusCode > 399 {
+		return response, errors.New(r.Status)
 	}
 	return response, nil
 }
@@ -167,10 +170,12 @@ func (connection *Connection) ConnectJSON(endpoint string) (map[string]interface
 	var x []byte
 
 	response, err := connection.request("CONNECT", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
+
 }
 
 // Delete issues a HTTP DELETE request and returns the raw data.
@@ -184,10 +189,11 @@ func (connection *Connection) DeleteJSON(endpoint string) (map[string]interface{
 	var x []byte
 
 	response, err := connection.request("DELETE", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Get issues a HTTP GET request and returns the raw data.
@@ -201,10 +207,11 @@ func (connection *Connection) GetJSON(endpoint string) (map[string]interface{}, 
 	var x []byte
 
 	response, err := connection.request("GET", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Head issues a HTTP HEAD request and returns the raw data.
@@ -218,10 +225,11 @@ func (connection *Connection) HeadJSON(endpoint string) (map[string]interface{},
 	var x []byte
 
 	response, err := connection.request("HEAD", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Options issues a HTTP OPTIONS request and returns the raw data.
@@ -235,10 +243,11 @@ func (connection *Connection) OptionsJSON(endpoint string) (map[string]interface
 	var x []byte
 
 	response, err := connection.request("OPTIONS", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Patch issues a HTTP PATCH (RFC 5789) request and returns the raw data.
@@ -249,10 +258,11 @@ func (connection *Connection) Patch(endpoint string, jsonData []byte) ([]byte, e
 // PatchJSON issues a HTTP PATCH request, parses the resulting data as JSON and returns the parse results.
 func (connection *Connection) PatchJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
 	response, err := connection.request("PATCH", endpoint, jsonData)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Post issues a HTTP POST request and returns the raw data.
@@ -262,11 +272,12 @@ func (connection *Connection) Post(endpoint string, jsonData []byte) ([]byte, er
 
 // PostJSON issues a HTTP POST request, parses the resulting data as JSON and returns the parse results.
 func (connection *Connection) PostJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
-	response, err := connection.request("POST", endpoint, jsonData)
-	if err != nil {
-		return nil, err
+	response, err := connection.request("PATCH", endpoint, jsonData)
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Put issues a HTTP PUT request and returns the raw data.
@@ -277,10 +288,11 @@ func (connection *Connection) Put(endpoint string, jsonData []byte) ([]byte, err
 // PutJSON issues a HTTP PUT request, parses the resulting data as JSON and returns the parse results.
 func (connection *Connection) PutJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
 	response, err := connection.request("PUT", endpoint, jsonData)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
 
 // Trace issues a HTTP TRACE request and returns the raw data.
@@ -294,8 +306,9 @@ func (connection *Connection) TraceJSON(endpoint string) (map[string]interface{}
 	var x []byte
 
 	response, err := connection.request("TRACE", endpoint, x)
-	if err != nil {
-		return nil, err
+	json, err2 := toJSON(response)
+	if err2 != nil {
+		return nil, err2
 	}
-	return toJSON(response)
+	return json, err
 }
