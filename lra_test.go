@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/julienschmidt/httprouter"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/julienschmidt/httprouter"
 )
 
 type ReturnData struct {
@@ -42,6 +44,8 @@ const epurl = "/test?stringdata=hello&intdata=42&booldata=true"
 const ep404 = "/error/404?stringdata=hello&intdata=42&booldata=true"
 const epjson = "/error/json?stringdata=hello&intdata=42&booldata=true"
 const epin = "/test"
+
+var Timeout time.Duration
 
 var indata = []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
 
@@ -159,6 +163,8 @@ func TestMain(m *testing.M) {
 	HL = make(HeaderList)
 	HL["test-header"] = "test"
 
+	Timeout = time.Second * 120
+
 	server := httptest.NewServer(router)
 	defer server.Close()
 	u := strings.Split(server.URL, ":")
@@ -212,7 +218,7 @@ func TestMain(m *testing.M) {
 func TestNewConnection_HTTP(t *testing.T) {
 
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection")
 		}
@@ -265,7 +271,7 @@ func TestNewConnection_User(t *testing.T) {
 	for _, server := range TestServers {
 		user := "admin"
 		password := "123456"
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", user, password, false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", user, password, false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection")
 		}
@@ -288,7 +294,7 @@ func TestNewConnection_User(t *testing.T) {
 func TestNewConnection_HTTPProxy_OK(t *testing.T) {
 	httpproxy := "http://proxy.example.com:3128"
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, httpproxy, false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, httpproxy, false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection")
 		}
@@ -305,7 +311,7 @@ func TestNewConnection_HTTPProxy_OK(t *testing.T) {
 func TestNewConnection_SocksProxy_OK(t *testing.T) {
 	socksproxy := "socks.example.com:8181"
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, socksproxy, true, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, socksproxy, true, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection")
 		}
@@ -322,7 +328,7 @@ func TestNewConnection_SocksProxy_OK(t *testing.T) {
 
 func TestConnect_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -333,48 +339,50 @@ func TestConnect_OK(t *testing.T) {
 
 func TestConnectJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.ConnectJSON(epurl)
+		err = connection.ConnectJSON(epurl, &data)
 		checkJSONResults(server, data, err, "CONNECT", t)
-		data, err = connection.ConnectJSON(ep404)
+		err = connection.ConnectJSON(ep404, &data)
 		check404(err, t)
-		data, err = connection.ConnectJSON(epjson)
+		err = connection.ConnectJSON(epjson, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestDelete_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		b, err := connection.Delete(epurl)
+		b, err := connection.Delete(epurl, indata)
 		checkRawResults(server, b, err, "DELETE", t)
 	}
 }
 
 func TestDeleteJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.DeleteJSON(epurl)
+		err = connection.DeleteJSON(epurl, indata, &data)
 		checkJSONResults(server, data, err, "DELETE", t)
-		data, err = connection.DeleteJSON(ep404)
+		err = connection.DeleteJSON(ep404, indata, &data)
 		check404(err, t)
-		data, err = connection.DeleteJSON(epjson)
+		err = connection.DeleteJSON(epjson, indata, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestGet_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -386,22 +394,23 @@ func TestGet_OK(t *testing.T) {
 
 func TestGetJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.GetJSON(epurl)
+		err = connection.GetJSON(epurl, &data)
 		checkJSONResults(server, data, err, "GET", t)
-		data, err = connection.GetJSON(ep404)
+		err = connection.GetJSON(ep404, &data)
 		check404(err, t)
-		data, err = connection.GetJSON(epjson)
+		err = connection.GetJSON(epjson, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestHead_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -423,11 +432,12 @@ func TestHead_OK(t *testing.T) {
 
 func TestHeadJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		hdr := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		hdr, err := connection.HeadJSON(epurl)
+		err = connection.HeadJSON(epurl, &hdr)
 		if err != nil {
 			t.Errorf("Error creating connection: %v", err.Error())
 		}
@@ -460,7 +470,7 @@ func TestHeadJSON_OK(t *testing.T) {
 
 func TestOptions_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -471,22 +481,23 @@ func TestOptions_OK(t *testing.T) {
 
 func TestOptionsJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.OptionsJSON(epurl)
+		err = connection.OptionsJSON(epurl, &data)
 		checkJSONResults(server, data, err, "OPTIONS", t)
-		data, err = connection.OptionsJSON(ep404)
+		err = connection.OptionsJSON(ep404, &data)
 		check404(err, t)
-		data, err = connection.OptionsJSON(epjson)
+		err = connection.OptionsJSON(epjson, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestPatch_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
@@ -498,22 +509,23 @@ func TestPatch_OK(t *testing.T) {
 
 func TestPatchJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.PatchJSON(epin, indata)
+		err = connection.PatchJSON(epin, indata, &data)
 		checkJSONResults(server, data, err, "PATCH", t)
-		data, err = connection.PatchJSON(ep404, indata)
+		err = connection.PatchJSON(ep404, indata, &data)
 		check404(err, t)
-		data, err = connection.PatchJSON(epjson, indata)
+		err = connection.PatchJSON(epjson, indata, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestPost_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -524,22 +536,23 @@ func TestPost_OK(t *testing.T) {
 
 func TestPostJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.PostJSON(epin, indata)
+		err = connection.PostJSON(epin, indata, &data)
 		checkJSONResults(server, data, err, "POST", t)
-		data, err = connection.PostJSON(ep404, indata)
+		err = connection.PostJSON(ep404, indata, &data)
 		check404(err, t)
-		data, err = connection.PostJSON(epjson, indata)
+		err = connection.PostJSON(epjson, indata, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestPut_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -550,22 +563,23 @@ func TestPut_OK(t *testing.T) {
 
 func TestPutJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.PutJSON(epin, indata)
+		err = connection.PutJSON(epin, indata, &data)
 		checkJSONResults(server, data, err, "PUT", t)
-		data, err = connection.PutJSON(ep404, indata)
+		err = connection.PutJSON(ep404, indata, &data)
 		check404(err, t)
-		data, err = connection.PutJSON(epjson, indata)
+		err = connection.PutJSON(epjson, indata, &data)
 		checkJSONError(err, t)
 	}
 }
 
 func TestTrace_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
@@ -576,15 +590,16 @@ func TestTrace_OK(t *testing.T) {
 
 func TestTraceJSON_OK(t *testing.T) {
 	for _, server := range TestServers {
-		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL)
+		data := make(map[string]interface{})
+		connection, err := NewConnection(server.SSL, server.Host, server.Port, "/base", "", "", false, "", false, HL, Timeout)
 		if err != nil {
 			t.Fatalf("Error creating connection: %v", err.Error())
 		}
-		data, err := connection.TraceJSON(epurl)
+		err = connection.TraceJSON(epurl, &data)
 		checkJSONResults(server, data, err, "TRACE", t)
-		data, err = connection.TraceJSON(ep404)
+		err = connection.TraceJSON(ep404, &data)
 		check404(err, t)
-		data, err = connection.TraceJSON(epjson)
+		err = connection.TraceJSON(epjson, &data)
 		checkJSONError(err, t)
 	}
 }

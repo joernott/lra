@@ -1,7 +1,12 @@
+// Copyright 2018-2022 Jörn Ott. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 // Package lra is a lowlevel REST api client with some convenient functions like proxy and ssl handling.
 //
 // This package handles http and socks proxies as well as self signed certificates.
 // It also allows the specification of Headers to be sent with every request.
+
 package lra
 
 import (
@@ -40,6 +45,7 @@ type Connection struct {
 	BaseURL      string
 	SendHeaders  HeaderList
 	Client       *http.Client
+	Timeout      time.Duration
 }
 
 // NewConnection builds a Connection object with a configured http client.
@@ -54,9 +60,13 @@ type Connection struct {
 // it is the URL of a HTTP proxy to use
 // SendHeaders is a list of Headers to send with the requests. This allows to pass
 // authentication headers, content type definitions etc.
-func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, User string, Password string, ValidateSSL bool, Proxy string, ProxyIsSocks bool, SendHeaders HeaderList) (*Connection, error) {
+func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, User string, Password string, ValidateSSL bool, Proxy string, ProxyIsSocks bool, SendHeaders HeaderList, Timeout time.Duration) (*Connection, error) {
 	var connection *Connection
 	var tr *http.Transport
+
+	if Timeout == time.Second*0 {
+		Timeout = time.Second * 60
+	}
 
 	connection = new(Connection)
 	tr = &http.Transport{
@@ -85,7 +95,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 	}
 	connection.Client = &http.Client{
 		Transport: tr,
-		Timeout:   time.Second * 10}
+		Timeout:   Timeout}
 	if UseSSL {
 		connection.Protocol = "https"
 	} else {
@@ -105,6 +115,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 		connection.BaseURL = connection.BaseURL + User + ":" + Password + "@"
 	}
 	connection.BaseURL = connection.BaseURL + Server + ":" + strconv.Itoa(Port) + BaseEndpoint
+	connection.Timeout = Timeout
 	return connection, nil
 }
 
@@ -116,7 +127,7 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 
 	target := connection.BaseURL + endpoint
 	switch method {
-	case "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS":
+	case "CONNECT", "GET", "HEAD", "OPTIONS":
 		req, err = http.NewRequest(method, target, nil)
 	default:
 		req, err = http.NewRequest(method, target, bytes.NewBuffer(jsonData))
@@ -149,16 +160,6 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 	return response, nil
 }
 
-func toJSON(response []byte) (map[string]interface{}, error) {
-	var data interface{}
-	err := json.Unmarshal(response, &data)
-	if err != nil {
-		return nil, err
-	}
-	m := data.(map[string]interface{})
-	return m, nil
-}
-
 // Connect issues a HTTP CONNECT request and returns the raw data.
 func (connection *Connection) Connect(endpoint string) ([]byte, error) {
 	var x []byte
@@ -166,34 +167,36 @@ func (connection *Connection) Connect(endpoint string) ([]byte, error) {
 }
 
 // ConnectJSON issues a HTTP Connect request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) ConnectJSON(endpoint string) (map[string]interface{}, error) {
+func (connection *Connection) ConnectJSON(endpoint string, data interface{}) error {
 	var x []byte
 
 	response, err := connection.request("CONNECT", endpoint, x)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
-
+	return err
 }
 
 // Delete issues a HTTP DELETE request and returns the raw data.
-func (connection *Connection) Delete(endpoint string) ([]byte, error) {
-	var x []byte
-	return connection.request("DELETE", endpoint, x)
+func (connection *Connection) Delete(endpoint string, jsonData []byte) ([]byte, error) {
+	return connection.request("DELETE", endpoint, jsonData)
 }
 
 // DeleteJSON issues a HTTP DELETE request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) DeleteJSON(endpoint string) (map[string]interface{}, error) {
-	var x []byte
-
-	response, err := connection.request("DELETE", endpoint, x)
-	json, err2 := toJSON(response)
+func (connection *Connection) DeleteJSON(endpoint string, jsonData []byte, data interface{}) error {
+	response, err := connection.request("DELETE", endpoint, jsonData)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Get issues a HTTP GET request and returns the raw data.
@@ -203,15 +206,18 @@ func (connection *Connection) Get(endpoint string) ([]byte, error) {
 }
 
 // GetJSON issues a HTTP GET request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) GetJSON(endpoint string) (map[string]interface{}, error) {
+func (connection *Connection) GetJSON(endpoint string, data interface{}) error {
 	var x []byte
 
 	response, err := connection.request("GET", endpoint, x)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Head issues a HTTP HEAD request and returns the raw data.
@@ -221,15 +227,18 @@ func (connection *Connection) Head(endpoint string) ([]byte, error) {
 }
 
 // HeadJSON issues a HTTP HEAD request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) HeadJSON(endpoint string) (map[string]interface{}, error) {
+func (connection *Connection) HeadJSON(endpoint string, data interface{}) error {
 	var x []byte
 
 	response, err := connection.request("HEAD", endpoint, x)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Options issues a HTTP OPTIONS request and returns the raw data.
@@ -239,15 +248,18 @@ func (connection *Connection) Options(endpoint string) ([]byte, error) {
 }
 
 // OptionsJSON issues a HTTP OPTIONS request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) OptionsJSON(endpoint string) (map[string]interface{}, error) {
+func (connection *Connection) OptionsJSON(endpoint string, data interface{}) error {
 	var x []byte
 
 	response, err := connection.request("OPTIONS", endpoint, x)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Patch issues a HTTP PATCH (RFC 5789) request and returns the raw data.
@@ -256,13 +268,16 @@ func (connection *Connection) Patch(endpoint string, jsonData []byte) ([]byte, e
 }
 
 // PatchJSON issues a HTTP PATCH request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) PatchJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
+func (connection *Connection) PatchJSON(endpoint string, jsonData []byte, data interface{}) error {
 	response, err := connection.request("PATCH", endpoint, jsonData)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Post issues a HTTP POST request and returns the raw data.
@@ -271,13 +286,16 @@ func (connection *Connection) Post(endpoint string, jsonData []byte) ([]byte, er
 }
 
 // PostJSON issues a HTTP POST request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) PostJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
-	response, err := connection.request("PATCH", endpoint, jsonData)
-	json, err2 := toJSON(response)
+func (connection *Connection) PostJSON(endpoint string, jsonData []byte, data interface{}) error {
+	response, err := connection.request("POST", endpoint, jsonData)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Put issues a HTTP PUT request and returns the raw data.
@@ -286,13 +304,16 @@ func (connection *Connection) Put(endpoint string, jsonData []byte) ([]byte, err
 }
 
 // PutJSON issues a HTTP PUT request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) PutJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
+func (connection *Connection) PutJSON(endpoint string, jsonData []byte, data interface{}) error {
 	response, err := connection.request("PUT", endpoint, jsonData)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
 
 // Trace issues a HTTP TRACE request and returns the raw data.
@@ -302,13 +323,16 @@ func (connection *Connection) Trace(endpoint string) ([]byte, error) {
 }
 
 // TraceJSON issues a HTTP TRACE request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) TraceJSON(endpoint string) (map[string]interface{}, error) {
+func (connection *Connection) TraceJSON(endpoint string, data interface{}) error {
 	var x []byte
 
 	response, err := connection.request("TRACE", endpoint, x)
-	json, err2 := toJSON(response)
+	err2 := json.Unmarshal(response, data)
 	if err2 != nil {
-		return nil, err2
+		if err != nil {
+			return err
+		}
+		return err2
 	}
-	return json, err
+	return err
 }
