@@ -40,6 +40,7 @@ type Connection struct {
 	BaseURL      string
 	SendHeaders  HeaderList
 	Client       *http.Client
+	Timeout      time.Duration
 }
 
 // NewConnection builds a Connection object with a configured http client.
@@ -54,9 +55,13 @@ type Connection struct {
 // it is the URL of a HTTP proxy to use
 // SendHeaders is a list of Headers to send with the requests. This allows to pass
 // authentication headers, content type definitions etc.
-func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, User string, Password string, ValidateSSL bool, Proxy string, ProxyIsSocks bool, SendHeaders HeaderList) (*Connection, error) {
+func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, User string, Password string, ValidateSSL bool, Proxy string, ProxyIsSocks bool, SendHeaders HeaderList, Timeout time.Duration) (*Connection, error) {
 	var connection *Connection
 	var tr *http.Transport
+
+	if Timeout == time.Second*0 {
+		Timeout = time.Second * 60
+	}
 
 	connection = new(Connection)
 	tr = &http.Transport{
@@ -85,7 +90,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 	}
 	connection.Client = &http.Client{
 		Transport: tr,
-		Timeout:   time.Second * 10}
+		Timeout:   Timeout}
 	if UseSSL {
 		connection.Protocol = "https"
 	} else {
@@ -105,6 +110,7 @@ func NewConnection(UseSSL bool, Server string, Port int, BaseEndpoint string, Us
 		connection.BaseURL = connection.BaseURL + User + ":" + Password + "@"
 	}
 	connection.BaseURL = connection.BaseURL + Server + ":" + strconv.Itoa(Port) + BaseEndpoint
+	connection.Timeout = Timeout
 	return connection, nil
 }
 
@@ -116,7 +122,7 @@ func (connection *Connection) request(method string, endpoint string, jsonData [
 
 	target := connection.BaseURL + endpoint
 	switch method {
-	case "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS":
+	case "CONNECT", "GET", "HEAD", "OPTIONS":
 		req, err = http.NewRequest(method, target, nil)
 	default:
 		req, err = http.NewRequest(method, target, bytes.NewBuffer(jsonData))
@@ -179,16 +185,13 @@ func (connection *Connection) ConnectJSON(endpoint string) (map[string]interface
 }
 
 // Delete issues a HTTP DELETE request and returns the raw data.
-func (connection *Connection) Delete(endpoint string) ([]byte, error) {
-	var x []byte
-	return connection.request("DELETE", endpoint, x)
+func (connection *Connection) Delete(endpoint string, jsonData []byte) ([]byte, error) {
+	return connection.request("DELETE", endpoint, jsonData)
 }
 
 // DeleteJSON issues a HTTP DELETE request, parses the resulting data as JSON and returns the parse results.
-func (connection *Connection) DeleteJSON(endpoint string) (map[string]interface{}, error) {
-	var x []byte
-
-	response, err := connection.request("DELETE", endpoint, x)
+func (connection *Connection) DeleteJSON(endpoint string, jsonData []byte) (map[string]interface{}, error) {
+	response, err := connection.request("DELETE", endpoint, jsonData)
 	json, err2 := toJSON(response)
 	if err2 != nil {
 		return nil, err2
