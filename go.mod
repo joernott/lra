@@ -1,4 +1,4 @@
-module lra
+module github.com/joernott/lra
 
 go 1.16
 
