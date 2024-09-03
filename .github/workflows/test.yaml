@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  pull_request: {}
+  push: {}
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: 'ubuntu-latest'
+    strategy:
+      matrix:
+        go:
+            - '1.14.x'
+            - '1.15.x'
+            - '1.16.x'
+            - '1.17.x'
+            - '1.18.x'
+            - '1.19.x'
+            - '1.20.x'
+            - '1.21.x'
+            - 'master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+
+      - name: Unit Test
+        run: |
+          go get -v .
+          go test -v -cover -coverprofile=coverage.out
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.html
+
+      - uses: codecov/codecov-action@v4
+        with:
+            files: ./coverage.out
+            token: ${{ secrets.CODECOV_TOKEN }}
+            verbose: true
