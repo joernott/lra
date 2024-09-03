@@ -19,7 +19,7 @@ jobs:
             - '1.19.x'
             - '1.20.x'
             - '1.21.x'
-            - 'master'
+            - 'stable'
     steps:
       - uses: actions/checkout@v4
 
