@@ -31,7 +31,7 @@ type HeaderList map[string]string
 // headers to send with every request.
 //
 // The fields are mostly set by the parameters passed to the NewConnection function
-//except for Protocol, BaseURL and Client which are constructed based on those informations.
+// except for Protocol, BaseURL and Client which are constructed based on those informations.
 type Connection struct {
 	Protocol     string
 	Server       string
