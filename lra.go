@@ -1,161 +1,112 @@
-// Copyright 2018-2026 Jörn Ott. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// Package lra is a lowlevel REST api client with some convenient functions like proxy and ssl handling.
-//
-// This package handles http and socks proxies as well as self signed certificates.
-// It also allows the specification of Headers to be sent with every request.
-//
-// Every request method exists in a variant taking a [context.Context] (for
-// example [Connection.GetContext]), which allows cancelling requests and
-// setting per-request deadlines. The variants without context use
-// [context.Background].
 package lra
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
-
-	"golang.org/x/net/proxy"
 )
 
-// DefaultTimeout is the overall request timeout used when NewConnection is
-// called with a zero timeout.
-const DefaultTimeout = 60 * time.Second
+// Client sends requests to a REST API below a base URL. Create it with [New].
+type Client struct {
+	base            *url.URL
+	header          http.Header
+	user, password  string
+	basicAuth       bool
+	hc              *http.Client
+	maxResponseSize int64
+}
 
-// HeaderList is a key-value list of headers to set on every request. Used when declaring the connection.
-type HeaderList map[string]string
-
-// StatusError is returned when the server answers with a HTTP status code of
-// 400 or above. Use [errors.AsType] (or [errors.As]) to inspect it:
-//
-//	if se, ok := errors.AsType[*lra.StatusError](err); ok && se.StatusCode == http.StatusNotFound {
-//		...
-//	}
-type StatusError struct {
-	// StatusCode is the numeric HTTP status code, e.g. 404.
+// Response is the result of [Client.Do].
+type Response struct {
+	// StatusCode is the numeric HTTP status code, e.g. 200.
 	StatusCode int
-	// Status is the status line as returned by the server, e.g. "404 Not Found".
+	// Status is the status line, e.g. "200 OK".
 	Status string
-	// Body holds the response body (for HEAD requests: the JSON encoded headers).
+	// Header contains the response headers.
+	Header http.Header
+	// Body is the complete response body.
 	Body []byte
 }
 
-// Error returns the HTTP status line, e.g. "404 Not Found".
-func (e *StatusError) Error() string {
-	return e.Status
-}
-
-// The Connection object stores all the information needed to handle requests.
-// Apart from the http.Client, it also contains the original settings and additional
-// headers to send with every request.
-//
-// The fields are mostly set by the parameters passed to the NewConnection function
-// except for Protocol, BaseURL and Client which are constructed based on those informations.
-// Changing the fields after creating the connection has no effect on the requests,
-// except for SendHeaders and Client.
-//
-// A Connection is safe for concurrent use by multiple goroutines as long as
-// its fields are not modified.
-type Connection struct {
-	Protocol     string
-	Server       string
-	Port         int
-	BaseEndpoint string
-	User         string
-	Password     string
-	ValidateSSL  bool
-	Proxy        string
-	ProxyIsSocks bool
-	// BaseURL is the URL all endpoints are appended to. If a user is set, it
-	// contains the (URL-escaped) credentials.
-	BaseURL     string
-	SendHeaders HeaderList
-	Client      *http.Client
-	Timeout     time.Duration
-}
-
-// NewConnection builds a Connection object with a configured http client.
-//
-// If useSSL is true, https is used, otherwise http. server and port specify the
-// server name or IP (IPv6 addresses may be given with or without brackets) and
-// the port to connect to. The baseEndpoint is added directly behind the port
-// which allows skipping some base path before the api itself. user and password
-// are used for basic authentication.
-// validateSSL, if set to false, allows to skip SSL validation, which is needed for
-// self signed certificates.
-// If proxyIsSocks is set to true, proxyAddr is the address of a SOCKS5 proxy,
-// either as host:port or as URL (socks5://[user:password@]host:port).
-// If proxyIsSocks is false, proxyAddr is the URL of a HTTP proxy to use
-// (http://host:port; a missing scheme defaults to http).
-// sendHeaders is a list of Headers to send with the requests. This allows to pass
-// authentication headers, content type definitions etc.
-// timeout is the overall timeout for a request, a value of 0 means DefaultTimeout.
-func NewConnection(useSSL bool, server string, port int, baseEndpoint string, user string, password string, validateSSL bool, proxyAddr string, proxyIsSocks bool, sendHeaders HeaderList, timeout time.Duration) (*Connection, error) {
-	if timeout == 0 {
-		timeout = DefaultTimeout
-	}
-
-	tr, err := newTransport(validateSSL, proxyAddr, proxyIsSocks)
+// New creates a Client for the API at baseURL, e.g.
+// "https://elasticsearch.example.com:9200" or "http://[::1]:8080/api/v1".
+// The scheme must be http or https. Credentials in the URL
+// ("https://user:password@host") are used for basic authentication.
+func New(baseURL string, opts ...Option) (*Client, error) {
+	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lra: invalid base URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("lra: unsupported base URL scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("lra: base URL %q has no host", u.Redacted())
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, fmt.Errorf("lra: base URL %q must not contain a query or fragment", u.Redacted())
 	}
 
-	protocol := "http"
-	if useSSL {
-		protocol = "https"
+	o := options{header: make(http.Header)}
+	if u.User != nil {
+		o.user = u.User.Username()
+		o.password, _ = u.User.Password()
+		o.basicAuth = true
+		u.User = nil
+	}
+	for _, opt := range opts {
+		if err := opt(&o); err != nil {
+			return nil, err
+		}
 	}
 
-	host := strings.TrimSuffix(strings.TrimPrefix(server, "["), "]")
-	base := url.URL{
-		Scheme: protocol,
-		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
-	}
-	if user != "" {
-		base.User = url.UserPassword(user, password)
+	hc := o.httpClient
+	if hc != nil {
+		if o.timeoutSet || o.tlsConfig != nil || o.insecure || o.proxySet {
+			return nil, errors.New("lra: WithHTTPClient can't be combined with timeout, TLS or proxy options")
+		}
+	} else {
+		hc = &http.Client{
+			Transport: newTransport(&o),
+			Timeout:   DefaultTimeout,
+		}
+		if o.timeoutSet {
+			hc.Timeout = o.timeout
+		}
 	}
 
-	return &Connection{
-		Protocol:     protocol,
-		Server:       server,
-		Port:         port,
-		BaseEndpoint: baseEndpoint,
-		User:         user,
-		Password:     password,
-		ValidateSSL:  validateSSL,
-		Proxy:        proxyAddr,
-		ProxyIsSocks: proxyIsSocks,
-		BaseURL:      base.String() + baseEndpoint,
-		SendHeaders:  sendHeaders,
-		Client: &http.Client{
-			Transport: tr,
-			Timeout:   timeout,
-		},
-		Timeout: timeout,
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	u.RawPath = strings.TrimSuffix(u.RawPath, "/")
+
+	return &Client{
+		base:            u,
+		header:          o.header,
+		user:            o.user,
+		password:        o.password,
+		basicAuth:       o.basicAuth,
+		hc:              hc,
+		maxResponseSize: o.maxResponseSize,
 	}, nil
 }
 
-// newTransport creates a http.Transport with the same defaults as
-// http.DefaultTransport, but with a larger connection pool and the
-// configured TLS and proxy settings. Proxy settings from the environment
-// (HTTP_PROXY etc.) are deliberately not used.
-func newTransport(validateSSL bool, proxyAddr string, proxyIsSocks bool) (*http.Transport, error) {
+// newTransport creates a transport with the defaults of http.DefaultTransport,
+// a larger connection pool and the configured TLS and proxy settings.
+func newTransport(o *options) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          200,
@@ -164,297 +115,179 @@ func newTransport(validateSSL bool, proxyAddr string, proxyIsSocks bool) (*http.
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	if !validateSSL {
-		// Explicitly requested by the caller, e.g. for self signed certificates.
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
-	}
-
-	if proxyAddr == "" {
-		return tr, nil
-	}
-
-	if proxyIsSocks {
-		d, err := socksDialer(proxyAddr, dialer)
-		if err != nil {
-			return nil, err
+	if o.proxySet {
+		tr.Proxy = nil
+		if o.proxyURL != nil {
+			tr.Proxy = http.ProxyURL(o.proxyURL)
 		}
-		tr.DialContext = d.DialContext
-		return tr, nil
 	}
+	if o.tlsConfig != nil || o.insecure {
+		cfg := o.tlsConfig
+		if cfg == nil {
+			cfg = &tls.Config{}
+		}
+		if o.insecure {
+			cfg.InsecureSkipVerify = true //nolint:gosec // explicitly requested
+		}
+		tr.TLSClientConfig = cfg
+	}
+	return tr
+}
 
-	if !strings.Contains(proxyAddr, "://") {
-		proxyAddr = "http://" + proxyAddr
+// BaseURL returns the base URL without credentials.
+func (c *Client) BaseURL() string {
+	return c.base.String()
+}
+
+// HTTPClient returns the underlying http.Client, e.g. to send requests created
+// with [Client.NewRequest].
+func (c *Client) HTTPClient() *http.Client {
+	return c.hc
+}
+
+// NewRequest creates a request for endpoint (which is appended to the base URL)
+// with the configured headers and credentials. Use it together with
+// [Client.HTTPClient] for streaming or per-request headers.
+func (c *Client) NewRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
+	if endpoint != "" && endpoint[0] != '/' && endpoint[0] != '?' {
+		endpoint = "/" + endpoint
 	}
-	proxyURL, err := url.Parse(proxyAddr)
+	req, err := http.NewRequestWithContext(ctx, method, c.base.String()+endpoint, body)
 	if err != nil {
 		return nil, err
 	}
-	if proxyURL.Host == "" {
-		return nil, fmt.Errorf("lra: invalid HTTP proxy URL %q: missing host", proxyAddr)
+	for k, v := range c.header {
+		req.Header[k] = slices.Clone(v)
 	}
-	tr.Proxy = http.ProxyURL(proxyURL)
-	return tr, nil
+	if host := c.header.Get("Host"); host != "" {
+		req.Host = host
+	}
+	if c.basicAuth {
+		req.SetBasicAuth(c.user, c.password)
+	}
+	return req, nil
 }
 
-// socksDialer returns a SOCKS5 dialer for addr, which is either host:port or a
-// socks5:// or socks5h:// URL.
-func socksDialer(addr string, forward *net.Dialer) (proxy.ContextDialer, error) {
-	var (
-		d   proxy.Dialer
-		err error
-	)
-	if strings.Contains(addr, "://") {
-		u, perr := url.Parse(addr)
-		if perr != nil {
-			return nil, perr
-		}
-		d, err = proxy.FromURL(u, forward)
-	} else {
-		if _, _, err = net.SplitHostPort(addr); err != nil {
-			return nil, fmt.Errorf("lra: invalid SOCKS5 proxy address %q: %w", addr, err)
-		}
-		d, err = proxy.SOCKS5("tcp", addr, nil, forward)
-	}
-	if err != nil {
-		return nil, err
-	}
-	cd, ok := d.(proxy.ContextDialer)
-	if !ok {
-		return nil, fmt.Errorf("lra: SOCKS5 dialer for %q does not support contexts", addr)
-	}
-	return cd, nil
+// Do sends a request and returns the response. For status codes of 400 and
+// above, both the response and a [*StatusError] are returned.
+func (c *Client) Do(ctx context.Context, method, endpoint string, body []byte) (*Response, error) {
+	return c.do(ctx, method, endpoint, body, nil)
 }
 
-// request executes the HTTP request. For HEAD requests, the response headers
-// are returned as JSON. For status codes >= 400, the response is returned
-// together with a *StatusError.
-func (c *Connection) request(ctx context.Context, method string, endpoint string, body []byte) ([]byte, error) {
-	var reqBody io.Reader
+// do sends a request. defaultHeader is only applied for headers not
+// configured for the client.
+func (c *Client) do(ctx context.Context, method, endpoint string, body []byte, defaultHeader http.Header) (*Response, error) {
+	var r io.Reader
 	if len(body) > 0 {
-		reqBody = bytes.NewReader(body)
+		r = bytes.NewReader(body)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+endpoint, reqBody)
+	req, err := c.NewRequest(ctx, method, endpoint, r)
 	if err != nil {
 		return nil, err
 	}
-	for h, v := range c.SendHeaders {
-		req.Header.Set(h, v)
-	}
-
-	r, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Body.Close()
-
-	var response []byte
-	if method == http.MethodHead {
-		response, err = json.Marshal(r.Header)
-	} else {
-		response, err = io.ReadAll(r.Body)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if r.StatusCode >= http.StatusBadRequest {
-		return response, &StatusError{
-			StatusCode: r.StatusCode,
-			Status:     r.Status,
-			Body:       response,
+	for k, v := range defaultHeader {
+		if _, ok := req.Header[k]; !ok {
+			req.Header[k] = v
 		}
 	}
-	return response, nil
-}
 
-// requestJSON executes the request and decodes the response into data. If the
-// request fails, its error takes precedence over a JSON decoding error. data is
-// populated even if the server returned an error status, as long as the
-// response body is valid JSON.
-func (c *Connection) requestJSON(ctx context.Context, method string, endpoint string, body []byte, data any) error {
-	response, err := c.request(ctx, method, endpoint, body)
-	if jsonErr := json.Unmarshal(response, data); jsonErr != nil && err == nil {
-		return jsonErr
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
 	}
-	return err
+	defer resp.Body.Close()
+
+	data, err := c.readBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("lra: reading response of %s %s: %w", method, redact(req.URL), err)
+	}
+	res := &Response{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Header:     resp.Header,
+		Body:       data,
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return res, &StatusError{
+			Method:     method,
+			URL:        redact(req.URL),
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Header:     resp.Header,
+			Body:       data,
+		}
+	}
+	return res, nil
 }
 
-// Connect issues a HTTP CONNECT request and returns the raw data.
-func (c *Connection) Connect(endpoint string) ([]byte, error) {
-	return c.ConnectContext(context.Background(), endpoint)
+func (c *Client) readBody(r io.Reader) ([]byte, error) {
+	if c.maxResponseSize == 0 {
+		return io.ReadAll(r)
+	}
+	data, err := io.ReadAll(io.LimitReader(r, c.maxResponseSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > c.maxResponseSize {
+		return nil, fmt.Errorf("%w (limit %d bytes)", ErrResponseTooLarge, c.maxResponseSize)
+	}
+	return data, nil
 }
 
-// ConnectContext is like Connect but uses the given context.
-func (c *Connection) ConnectContext(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.request(ctx, http.MethodConnect, endpoint, nil)
+// redact returns u without credentials, query and fragment.
+func redact(u *url.URL) string {
+	r := *u
+	r.User = nil
+	r.RawQuery = ""
+	r.ForceQuery = false
+	r.Fragment = ""
+	r.RawFragment = ""
+	return r.String()
 }
 
-// ConnectJSON issues a HTTP CONNECT request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) ConnectJSON(endpoint string, data any) error {
-	return c.ConnectJSONContext(context.Background(), endpoint, data)
+func (c *Client) body(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
+	res, err := c.Do(ctx, method, endpoint, body)
+	if res == nil {
+		return nil, err
+	}
+	return res.Body, err
 }
 
-// ConnectJSONContext is like ConnectJSON but uses the given context.
-func (c *Connection) ConnectJSONContext(ctx context.Context, endpoint string, data any) error {
-	return c.requestJSON(ctx, http.MethodConnect, endpoint, nil, data)
+// Get sends a GET request and returns the response body.
+func (c *Client) Get(ctx context.Context, endpoint string) ([]byte, error) {
+	return c.body(ctx, http.MethodGet, endpoint, nil)
 }
 
-// Delete issues a HTTP DELETE request and returns the raw data.
-func (c *Connection) Delete(endpoint string, jsonData []byte) ([]byte, error) {
-	return c.DeleteContext(context.Background(), endpoint, jsonData)
+// Head sends a HEAD request and returns the response headers.
+func (c *Client) Head(ctx context.Context, endpoint string) (http.Header, error) {
+	res, err := c.Do(ctx, http.MethodHead, endpoint, nil)
+	if res == nil {
+		return nil, err
+	}
+	return res.Header, err
 }
 
-// DeleteContext is like Delete but uses the given context.
-func (c *Connection) DeleteContext(ctx context.Context, endpoint string, jsonData []byte) ([]byte, error) {
-	return c.request(ctx, http.MethodDelete, endpoint, jsonData)
+// Options sends an OPTIONS request and returns the response body.
+func (c *Client) Options(ctx context.Context, endpoint string) ([]byte, error) {
+	return c.body(ctx, http.MethodOptions, endpoint, nil)
 }
 
-// DeleteJSON issues a HTTP DELETE request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) DeleteJSON(endpoint string, jsonData []byte, data any) error {
-	return c.DeleteJSONContext(context.Background(), endpoint, jsonData, data)
+// Delete sends a DELETE request with an optional body and returns the response body.
+func (c *Client) Delete(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	return c.body(ctx, http.MethodDelete, endpoint, body)
 }
 
-// DeleteJSONContext is like DeleteJSON but uses the given context.
-func (c *Connection) DeleteJSONContext(ctx context.Context, endpoint string, jsonData []byte, data any) error {
-	return c.requestJSON(ctx, http.MethodDelete, endpoint, jsonData, data)
+// Patch sends a PATCH (RFC 5789) request and returns the response body.
+func (c *Client) Patch(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	return c.body(ctx, http.MethodPatch, endpoint, body)
 }
 
-// Get issues a HTTP GET request and returns the raw data.
-func (c *Connection) Get(endpoint string) ([]byte, error) {
-	return c.GetContext(context.Background(), endpoint)
+// Post sends a POST request and returns the response body.
+func (c *Client) Post(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	return c.body(ctx, http.MethodPost, endpoint, body)
 }
 
-// GetContext is like Get but uses the given context.
-func (c *Connection) GetContext(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.request(ctx, http.MethodGet, endpoint, nil)
-}
-
-// GetJSON issues a HTTP GET request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) GetJSON(endpoint string, data any) error {
-	return c.GetJSONContext(context.Background(), endpoint, data)
-}
-
-// GetJSONContext is like GetJSON but uses the given context.
-func (c *Connection) GetJSONContext(ctx context.Context, endpoint string, data any) error {
-	return c.requestJSON(ctx, http.MethodGet, endpoint, nil, data)
-}
-
-// Head issues a HTTP HEAD request and returns the response headers encoded as JSON.
-func (c *Connection) Head(endpoint string) ([]byte, error) {
-	return c.HeadContext(context.Background(), endpoint)
-}
-
-// HeadContext is like Head but uses the given context.
-func (c *Connection) HeadContext(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.request(ctx, http.MethodHead, endpoint, nil)
-}
-
-// HeadJSON issues a HTTP HEAD request and decodes the response headers into data.
-func (c *Connection) HeadJSON(endpoint string, data any) error {
-	return c.HeadJSONContext(context.Background(), endpoint, data)
-}
-
-// HeadJSONContext is like HeadJSON but uses the given context.
-func (c *Connection) HeadJSONContext(ctx context.Context, endpoint string, data any) error {
-	return c.requestJSON(ctx, http.MethodHead, endpoint, nil, data)
-}
-
-// Options issues a HTTP OPTIONS request and returns the raw data.
-func (c *Connection) Options(endpoint string) ([]byte, error) {
-	return c.OptionsContext(context.Background(), endpoint)
-}
-
-// OptionsContext is like Options but uses the given context.
-func (c *Connection) OptionsContext(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.request(ctx, http.MethodOptions, endpoint, nil)
-}
-
-// OptionsJSON issues a HTTP OPTIONS request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) OptionsJSON(endpoint string, data any) error {
-	return c.OptionsJSONContext(context.Background(), endpoint, data)
-}
-
-// OptionsJSONContext is like OptionsJSON but uses the given context.
-func (c *Connection) OptionsJSONContext(ctx context.Context, endpoint string, data any) error {
-	return c.requestJSON(ctx, http.MethodOptions, endpoint, nil, data)
-}
-
-// Patch issues a HTTP PATCH (RFC 5789) request and returns the raw data.
-func (c *Connection) Patch(endpoint string, jsonData []byte) ([]byte, error) {
-	return c.PatchContext(context.Background(), endpoint, jsonData)
-}
-
-// PatchContext is like Patch but uses the given context.
-func (c *Connection) PatchContext(ctx context.Context, endpoint string, jsonData []byte) ([]byte, error) {
-	return c.request(ctx, http.MethodPatch, endpoint, jsonData)
-}
-
-// PatchJSON issues a HTTP PATCH request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) PatchJSON(endpoint string, jsonData []byte, data any) error {
-	return c.PatchJSONContext(context.Background(), endpoint, jsonData, data)
-}
-
-// PatchJSONContext is like PatchJSON but uses the given context.
-func (c *Connection) PatchJSONContext(ctx context.Context, endpoint string, jsonData []byte, data any) error {
-	return c.requestJSON(ctx, http.MethodPatch, endpoint, jsonData, data)
-}
-
-// Post issues a HTTP POST request and returns the raw data.
-func (c *Connection) Post(endpoint string, jsonData []byte) ([]byte, error) {
-	return c.PostContext(context.Background(), endpoint, jsonData)
-}
-
-// PostContext is like Post but uses the given context.
-func (c *Connection) PostContext(ctx context.Context, endpoint string, jsonData []byte) ([]byte, error) {
-	return c.request(ctx, http.MethodPost, endpoint, jsonData)
-}
-
-// PostJSON issues a HTTP POST request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) PostJSON(endpoint string, jsonData []byte, data any) error {
-	return c.PostJSONContext(context.Background(), endpoint, jsonData, data)
-}
-
-// PostJSONContext is like PostJSON but uses the given context.
-func (c *Connection) PostJSONContext(ctx context.Context, endpoint string, jsonData []byte, data any) error {
-	return c.requestJSON(ctx, http.MethodPost, endpoint, jsonData, data)
-}
-
-// Put issues a HTTP PUT request and returns the raw data.
-func (c *Connection) Put(endpoint string, jsonData []byte) ([]byte, error) {
-	return c.PutContext(context.Background(), endpoint, jsonData)
-}
-
-// PutContext is like Put but uses the given context.
-func (c *Connection) PutContext(ctx context.Context, endpoint string, jsonData []byte) ([]byte, error) {
-	return c.request(ctx, http.MethodPut, endpoint, jsonData)
-}
-
-// PutJSON issues a HTTP PUT request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) PutJSON(endpoint string, jsonData []byte, data any) error {
-	return c.PutJSONContext(context.Background(), endpoint, jsonData, data)
-}
-
-// PutJSONContext is like PutJSON but uses the given context.
-func (c *Connection) PutJSONContext(ctx context.Context, endpoint string, jsonData []byte, data any) error {
-	return c.requestJSON(ctx, http.MethodPut, endpoint, jsonData, data)
-}
-
-// Trace issues a HTTP TRACE request and returns the raw data.
-func (c *Connection) Trace(endpoint string) ([]byte, error) {
-	return c.TraceContext(context.Background(), endpoint)
-}
-
-// TraceContext is like Trace but uses the given context.
-func (c *Connection) TraceContext(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.request(ctx, http.MethodTrace, endpoint, nil)
-}
-
-// TraceJSON issues a HTTP TRACE request, parses the resulting data as JSON and returns the parse results.
-func (c *Connection) TraceJSON(endpoint string, data any) error {
-	return c.TraceJSONContext(context.Background(), endpoint, data)
-}
-
-// TraceJSONContext is like TraceJSON but uses the given context.
-func (c *Connection) TraceJSONContext(ctx context.Context, endpoint string, data any) error {
-	return c.requestJSON(ctx, http.MethodTrace, endpoint, nil, data)
+// Put sends a PUT request and returns the response body.
+func (c *Client) Put(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	return c.body(ctx, http.MethodPut, endpoint, body)
 }

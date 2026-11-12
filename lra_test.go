@@ -2,6 +2,7 @@ package lra
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,8 +17,8 @@ import (
 	"time"
 )
 
-// returnData is what the echo handler sends back.
-type returnData struct {
+// echo is what the echo handler sends back.
+type echo struct {
 	Method     string      `json:"method"`
 	Protocol   string      `json:"protocol"`
 	Path       string      `json:"path"`
@@ -28,26 +29,34 @@ type returnData struct {
 	Error      string      `json:"error"`
 }
 
+// payload is the request data.
+type payload struct {
+	StringData string `json:"stringdata"`
+	IntData    int    `json:"intdata"`
+	BoolData   bool   `json:"booldata"`
+}
+
 const (
 	epURL  = "/test?stringdata=hello&intdata=42&booldata=true"
 	ep404  = "/error/404?stringdata=hello&intdata=42&booldata=true"
 	epJSON = "/error/json?stringdata=hello&intdata=42&booldata=true"
+	epNone = "/error/empty"
 	epIn   = "/test"
 
 	testTimeout = 10 * time.Second
 )
 
-var inData = []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
-
-func testHeaders() HeaderList {
-	return HeaderList{"test-header": "test"}
-}
+var (
+	inData    = []byte(`{"stringdata":"hello","intdata":42,"booldata":true}`)
+	inPayload = payload{StringData: "hello", IntData: 42, BoolData: true}
+)
 
 // echoHandler returns the request data as JSON. The data is taken from the
 // query string if there is one, otherwise from the JSON request body.
-// The paths /error/404 and /error/json return a 404 and invalid JSON.
+// The paths /error/404, /error/json and /error/empty return a 404, invalid
+// JSON and an empty body (204).
 func echoHandler(w http.ResponseWriter, r *http.Request) {
-	ret := returnData{
+	ret := echo{
 		Method:   r.Method,
 		Protocol: "http",
 		Path:     "/" + r.PathValue("path"),
@@ -55,6 +64,10 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.TLS != nil {
 		ret.Protocol = "https"
+	}
+	if ret.Path == "/error/empty" {
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	status := http.StatusOK
@@ -69,7 +82,7 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 			ret.Error = err.Error()
 		}
 	} else {
-		var in returnData
+		var in payload
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			status = http.StatusBadRequest
 			ret.Error = err.Error()
@@ -101,60 +114,50 @@ func echoMux() http.Handler {
 
 type testServer struct {
 	name     string
-	host     string
-	port     int
-	ssl      bool
 	protocol string
-	url      string
+	server   *httptest.Server
 }
 
 // startServers starts a http and a https server with the given handler.
 func startServers(t *testing.T, h http.Handler) []testServer {
 	t.Helper()
-	var servers []testServer
-	for _, ssl := range []bool{false, true} {
-		var s *httptest.Server
-		if ssl {
-			s = httptest.NewTLSServer(h)
-		} else {
-			s = httptest.NewServer(h)
-		}
-		t.Cleanup(s.Close)
-		addr := s.Listener.Addr().(*net.TCPAddr)
-		ts := testServer{
-			name:     "http",
-			host:     addr.IP.String(),
-			port:     addr.Port,
-			ssl:      ssl,
-			protocol: "http",
-			url:      s.URL,
-		}
-		if ssl {
-			ts.name, ts.protocol = "https", "https"
-		}
-		servers = append(servers, ts)
+	httpServer := httptest.NewServer(h)
+	t.Cleanup(httpServer.Close)
+	httpsServer := httptest.NewTLSServer(h)
+	t.Cleanup(httpsServer.Close)
+	return []testServer{
+		{"http", "http", httpServer},
+		{"https", "https", httpsServer},
 	}
-	return servers
 }
 
-// newTestConnection creates a connection to ts with the default test settings.
-func newTestConnection(t *testing.T, ts testServer) *Connection {
+// newTestClient creates a client for ts with the default test settings.
+func newTestClient(t *testing.T, ts testServer, opts ...Option) *Client {
 	t.Helper()
-	c, err := NewConnection(ts.ssl, ts.host, ts.port, "/base", "", "", false, "", false, testHeaders(), testTimeout)
-	if err != nil {
-		t.Fatalf("NewConnection: %v", err)
+	base := []Option{
+		WithHeader("test-header", "test"),
+		WithTimeout(testTimeout),
 	}
-	t.Cleanup(c.Client.CloseIdleConnections)
+	// Trust the certificate of the https test server.
+	if cfg := ts.server.Client().Transport.(*http.Transport).TLSClientConfig; cfg != nil {
+		base = append(base, WithTLSConfig(cfg))
+	}
+	opts = append(base, opts...)
+	c, err := New(ts.server.URL+"/base", opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(c.HTTPClient().CloseIdleConnections)
 	return c
 }
 
-// checkData verifies the echoed request data.
-func checkData(t *testing.T, protocol, method string, got returnData, err error) {
+// checkEcho verifies the echoed request data.
+func checkEcho(t *testing.T, protocol, method string, got echo, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := returnData{
+	want := echo{
 		Method:     method,
 		Protocol:   protocol,
 		Path:       "/test",
@@ -177,133 +180,119 @@ func checkRaw(t *testing.T, protocol, method string, raw []byte, err error) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var got returnData
+	var got echo
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("response %q is not valid JSON: %v", raw, err)
 	}
-	checkData(t, protocol, method, got, nil)
+	checkEcho(t, protocol, method, got, nil)
 }
 
-func check404(t *testing.T, err error) {
+func check404(t *testing.T, err error) *StatusError {
 	t.Helper()
-	var se *StatusError
-	if !errors.As(err, &se) {
+	se, ok := errors.AsType[*StatusError](err)
+	if !ok {
 		t.Fatalf("expected *StatusError, got %T: %v", err, err)
 	}
-	if se.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want %d", se.StatusCode, http.StatusNotFound)
+	if se.StatusCode != http.StatusNotFound || se.Status != "404 Not Found" {
+		t.Errorf("StatusCode/Status = %d/%q, want 404/%q", se.StatusCode, se.Status, "404 Not Found")
 	}
-	if se.Error() != "404 Not Found" {
-		t.Errorf("Error() = %q, want %q", se.Error(), "404 Not Found")
+	if strings.Contains(se.Error(), "?") || strings.Contains(se.URL, "stringdata") {
+		t.Errorf("StatusError leaks the query string: %q", se.Error())
 	}
+	return se
 }
 
-func checkJSONError(t *testing.T, err error) {
-	t.Helper()
-	if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
-		t.Errorf("expected *json.SyntaxError, got %T: %v", err, err)
-	}
-}
-
-func TestNewConnection(t *testing.T) {
-	for _, ts := range startServers(t, echoMux()) {
-		t.Run(ts.name, func(t *testing.T) {
-			c := newTestConnection(t, ts)
-			if c.Protocol != ts.protocol {
-				t.Errorf("Protocol = %q, want %q", c.Protocol, ts.protocol)
-			}
-			if c.Server != ts.host {
-				t.Errorf("Server = %q, want %q", c.Server, ts.host)
-			}
-			if c.Port != ts.port {
-				t.Errorf("Port = %d, want %d", c.Port, ts.port)
-			}
-			if c.BaseEndpoint != "/base" {
-				t.Errorf("BaseEndpoint = %q, want %q", c.BaseEndpoint, "/base")
-			}
-			if c.User != "" || c.Password != "" {
-				t.Errorf("User/Password = %q/%q, want empty", c.User, c.Password)
-			}
-			if c.ValidateSSL {
-				t.Error("ValidateSSL = true, want false")
-			}
-			if c.Proxy != "" || c.ProxyIsSocks {
-				t.Errorf("Proxy/ProxyIsSocks = %q/%v, want empty/false", c.Proxy, c.ProxyIsSocks)
-			}
-			if c.SendHeaders["test-header"] != "test" {
-				t.Errorf("SendHeaders[test-header] = %q, want %q", c.SendHeaders["test-header"], "test")
-			}
-			if want := ts.url + "/base"; c.BaseURL != want {
-				t.Errorf("BaseURL = %q, want %q", c.BaseURL, want)
-			}
-			if c.Timeout != testTimeout || c.Client.Timeout != testTimeout {
-				t.Errorf("Timeout = %v/%v, want %v", c.Timeout, c.Client.Timeout, testTimeout)
-			}
-		})
-	}
-}
-
-func TestNewConnection_User(t *testing.T) {
-	const user, password = "admin", "123456"
-	for _, ts := range startServers(t, echoMux()) {
-		t.Run(ts.name, func(t *testing.T) {
-			c, err := NewConnection(ts.ssl, ts.host, ts.port, "/base", user, password, false, "", false, testHeaders(), testTimeout)
-			if err != nil {
-				t.Fatalf("NewConnection: %v", err)
-			}
-			if c.User != user || c.Password != password {
-				t.Errorf("User/Password = %q/%q, want %q/%q", c.User, c.Password, user, password)
-			}
-			want := ts.protocol + "://" + user + ":" + password + "@" + ts.host + ":" + strconv.Itoa(ts.port) + "/base"
-			if c.BaseURL != want {
-				t.Errorf("BaseURL = %q, want %q", c.BaseURL, want)
-			}
-		})
-	}
-}
-
-func TestNewConnection_DefaultTimeout(t *testing.T) {
-	c, err := NewConnection(false, "localhost", 80, "", "", "", true, "", false, nil, 0)
-	if err != nil {
-		t.Fatalf("NewConnection: %v", err)
-	}
-	if c.Timeout != DefaultTimeout || c.Client.Timeout != DefaultTimeout {
-		t.Errorf("Timeout = %v/%v, want %v", c.Timeout, c.Client.Timeout, DefaultTimeout)
-	}
-}
-
-func TestNewConnection_Proxy(t *testing.T) {
+func TestNew(t *testing.T) {
 	tests := []struct {
-		name    string
-		proxy   string
-		socks   bool
-		wantErr bool
+		name     string
+		baseURL  string
+		opts     []Option
+		wantBase string
 	}{
-		{"http url", "http://proxy.example.com:3128", false, false},
-		{"http without scheme", "proxy.example.com:3128", false, false},
-		{"http invalid url", "http://%zz", false, true},
-		{"http missing host", "http://", false, true},
-		{"socks host:port", "socks.example.com:8181", true, false},
-		{"socks url", "socks5://socks.example.com:8181", true, false},
-		{"socks url with auth", "socks5h://user:pw@socks.example.com:8181", true, false},
-		{"socks missing port", "socks.example.com", true, true},
-		{"socks unknown scheme", "ftp://socks.example.com:8181", true, true},
-		{"socks invalid url", "socks5://%zz", true, true},
+		{"plain", "https://example.com", nil, "https://example.com"},
+		{"port and path", "http://example.com:8080/api/v1", nil, "http://example.com:8080/api/v1"},
+		{"trailing slash", "http://example.com/api/", nil, "http://example.com/api"},
+		{"credentials removed", "https://admin:secret@example.com/x", nil, "https://example.com/x"},
+		{"ipv6", "http://[::1]:9200", nil, "http://[::1]:9200"},
+		{"all options", "https://example.com", []Option{
+			WithBasicAuth("u", "p"),
+			WithHeader("a", "b"),
+			WithTimeout(0),
+			WithTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13}),
+			WithInsecureSkipVerify(),
+			WithProxy("socks5h://user:pw@proxy.example.com:1080"),
+			WithMaxResponseSize(1024),
+		}, "https://example.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, err := NewConnection(false, "localhost", 80, "", "", "", true, tt.proxy, tt.socks, nil, testTimeout)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
+			c, err := New(tt.baseURL, tt.opts...)
 			if err != nil {
-				t.Fatalf("NewConnection: %v", err)
+				t.Fatalf("New: %v", err)
 			}
-			if c.Proxy != tt.proxy || c.ProxyIsSocks != tt.socks {
-				t.Errorf("Proxy/ProxyIsSocks = %q/%v, want %q/%v", c.Proxy, c.ProxyIsSocks, tt.proxy, tt.socks)
+			if got := c.BaseURL(); got != tt.wantBase {
+				t.Errorf("BaseURL() = %q, want %q", got, tt.wantBase)
+			}
+		})
+	}
+}
+
+func TestNew_Defaults(t *testing.T) {
+	c, err := New("https://example.com")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.HTTPClient().Timeout != DefaultTimeout {
+		t.Errorf("Timeout = %v, want %v", c.HTTPClient().Timeout, DefaultTimeout)
+	}
+	tr := c.HTTPClient().Transport.(*http.Transport)
+	if tr.Proxy == nil {
+		t.Error("expected proxy from environment, got nil")
+	}
+	if tr.TLSClientConfig != nil {
+		t.Error("expected default TLS config")
+	}
+
+	c, err = New("https://example.com", WithoutProxy(), WithInsecureSkipVerify())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr = c.HTTPClient().Transport.(*http.Transport)
+	if tr.Proxy != nil {
+		t.Error("WithoutProxy: expected no proxy")
+	}
+	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
+		t.Error("WithInsecureSkipVerify: expected InsecureSkipVerify")
+	}
+}
+
+func TestNew_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		opts    []Option
+	}{
+		{"invalid url", "http://%zz", nil},
+		{"unsupported scheme", "ftp://example.com", nil},
+		{"no scheme", "example.com:8080", nil},
+		{"no host", "http:///path", nil},
+		{"query", "http://example.com/?x=1", nil},
+		{"fragment", "http://example.com/#x", nil},
+		{"negative timeout", "http://example.com", []Option{WithTimeout(-time.Second)}},
+		{"nil tls config", "http://example.com", []Option{WithTLSConfig(nil)}},
+		{"invalid proxy url", "http://example.com", []Option{WithProxy("http://%zz")}},
+		{"proxy without scheme", "http://example.com", []Option{WithProxy("proxy.example.com:3128")}},
+		{"unsupported proxy scheme", "http://example.com", []Option{WithProxy("ftp://proxy.example.com")}},
+		{"proxy without host", "http://example.com", []Option{WithProxy("socks5://")}},
+		{"nil http client", "http://example.com", []Option{WithHTTPClient(nil)}},
+		{"http client and timeout", "http://example.com", []Option{WithHTTPClient(&http.Client{}), WithTimeout(time.Second)}},
+		{"http client and proxy", "http://example.com", []Option{WithHTTPClient(&http.Client{}), WithoutProxy()}},
+		{"negative max response size", "http://example.com", []Option{WithMaxResponseSize(-1)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := New(tt.baseURL, tt.opts...); err == nil {
+				t.Error("expected error, got nil")
 			}
 		})
 	}
@@ -312,19 +301,17 @@ func TestNewConnection_Proxy(t *testing.T) {
 func TestRawMethods(t *testing.T) {
 	tests := []struct {
 		method string
-		call   func(*Connection) ([]byte, error)
+		call   func(*Client) ([]byte, error)
 	}{
-		{http.MethodConnect, func(c *Connection) ([]byte, error) { return c.Connect(epURL) }},
-		{http.MethodDelete, func(c *Connection) ([]byte, error) { return c.Delete(epURL, inData) }},
-		{http.MethodGet, func(c *Connection) ([]byte, error) { return c.Get(epURL) }},
-		{http.MethodOptions, func(c *Connection) ([]byte, error) { return c.Options(epURL) }},
-		{http.MethodPatch, func(c *Connection) ([]byte, error) { return c.Patch(epIn, inData) }},
-		{http.MethodPost, func(c *Connection) ([]byte, error) { return c.Post(epIn, inData) }},
-		{http.MethodPut, func(c *Connection) ([]byte, error) { return c.Put(epIn, inData) }},
-		{http.MethodTrace, func(c *Connection) ([]byte, error) { return c.Trace(epURL) }},
+		{http.MethodDelete, func(c *Client) ([]byte, error) { return c.Delete(t.Context(), epURL, inData) }},
+		{http.MethodGet, func(c *Client) ([]byte, error) { return c.Get(t.Context(), epURL) }},
+		{http.MethodOptions, func(c *Client) ([]byte, error) { return c.Options(t.Context(), epURL) }},
+		{http.MethodPatch, func(c *Client) ([]byte, error) { return c.Patch(t.Context(), epIn, inData) }},
+		{http.MethodPost, func(c *Client) ([]byte, error) { return c.Post(t.Context(), epIn, inData) }},
+		{http.MethodPut, func(c *Client) ([]byte, error) { return c.Put(t.Context(), epIn, inData) }},
 	}
 	for _, ts := range startServers(t, echoMux()) {
-		c := newTestConnection(t, ts)
+		c := newTestClient(t, ts)
 		for _, tt := range tests {
 			t.Run(ts.name+"/"+tt.method, func(t *testing.T) {
 				raw, err := tt.call(c)
@@ -334,99 +321,183 @@ func TestRawMethods(t *testing.T) {
 	}
 }
 
-func TestJSONMethods(t *testing.T) {
-	tests := []struct {
-		method string
-		ep     string
-		call   func(c *Connection, ep string, data any) error
-	}{
-		{http.MethodConnect, epURL, func(c *Connection, ep string, d any) error { return c.ConnectJSON(ep, d) }},
-		{http.MethodDelete, epURL, func(c *Connection, ep string, d any) error { return c.DeleteJSON(ep, inData, d) }},
-		{http.MethodGet, epURL, func(c *Connection, ep string, d any) error { return c.GetJSON(ep, d) }},
-		{http.MethodOptions, epURL, func(c *Connection, ep string, d any) error { return c.OptionsJSON(ep, d) }},
-		{http.MethodPatch, epIn, func(c *Connection, ep string, d any) error { return c.PatchJSON(ep, inData, d) }},
-		{http.MethodPost, epIn, func(c *Connection, ep string, d any) error { return c.PostJSON(ep, inData, d) }},
-		{http.MethodPut, epIn, func(c *Connection, ep string, d any) error { return c.PutJSON(ep, inData, d) }},
-		{http.MethodTrace, epURL, func(c *Connection, ep string, d any) error { return c.TraceJSON(ep, d) }},
-	}
+func TestDo(t *testing.T) {
 	for _, ts := range startServers(t, echoMux()) {
-		c := newTestConnection(t, ts)
-		for _, tt := range tests {
-			t.Run(ts.name+"/"+tt.method, func(t *testing.T) {
-				var data returnData
-				err := tt.call(c, tt.ep, &data)
-				checkData(t, ts.protocol, tt.method, data, err)
+		t.Run(ts.name, func(t *testing.T) {
+			c := newTestClient(t, ts)
+			res, err := c.Do(t.Context(), http.MethodTrace, epURL, nil)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("StatusCode/Content-Type = %d/%q", res.StatusCode, res.Header.Get("Content-Type"))
+			}
+			checkRaw(t, ts.protocol, http.MethodTrace, res.Body, nil)
 
-				check404(t, tt.call(c, ep404, &returnData{}))
-				checkJSONError(t, tt.call(c, epJSON, &returnData{}))
-			})
-		}
-	}
-}
-
-func checkHeadHeader(t *testing.T, h http.Header) {
-	t.Helper()
-	if ct := h.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
-	}
-	cl, err := strconv.Atoi(h.Get("Content-Length"))
-	if err != nil {
-		t.Fatalf("Content-Length %q is not a number: %v", h.Get("Content-Length"), err)
-	}
-	if cl <= 100 {
-		t.Errorf("Content-Length = %d, want > 100", cl)
+			res, err = c.Do(t.Context(), http.MethodGet, ep404, nil)
+			se := check404(t, err)
+			if res == nil || string(res.Body) != string(se.Body) || len(se.Body) == 0 {
+				t.Errorf("expected response body in both Response and StatusError")
+			}
+			if se.Method != http.MethodGet || se.URL != ts.server.URL+"/base/error/404" {
+				t.Errorf("StatusError Method/URL = %q/%q", se.Method, se.URL)
+			}
+			if se.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("StatusError.Header not set")
+			}
+			if want := "lra: GET " + se.URL + ": 404 Not Found"; se.Error() != want {
+				t.Errorf("Error() = %q, want %q", se.Error(), want)
+			}
+		})
 	}
 }
 
 func TestHead(t *testing.T) {
 	for _, ts := range startServers(t, echoMux()) {
 		t.Run(ts.name, func(t *testing.T) {
-			c := newTestConnection(t, ts)
-			raw, err := c.Head(epURL)
+			c := newTestClient(t, ts)
+			h, err := c.Head(t.Context(), epURL)
 			if err != nil {
 				t.Fatalf("Head: %v", err)
 			}
-			var h http.Header
-			if err := json.Unmarshal(raw, &h); err != nil {
-				t.Fatalf("Head result %q is not valid JSON: %v", raw, err)
+			if ct := h.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want %q", ct, "application/json")
 			}
-			checkHeadHeader(t, h)
-
-			_, err = c.Head(ep404)
+			if cl, _ := strconv.Atoi(h.Get("Content-Length")); cl <= 100 {
+				t.Errorf("Content-Length = %q, want > 100", h.Get("Content-Length"))
+			}
+			_, err = c.Head(t.Context(), ep404)
 			check404(t, err)
 		})
 	}
 }
 
-func TestHeadJSON(t *testing.T) {
+func TestJSONFunctions(t *testing.T) {
+	tests := []struct {
+		method string
+		ep     string
+		call   func(c *Client, ep string) (echo, error)
+	}{
+		{http.MethodDelete, epURL, func(c *Client, ep string) (echo, error) { return DeleteJSON[echo](t.Context(), c, ep, nil) }},
+		{http.MethodGet, epURL, func(c *Client, ep string) (echo, error) { return GetJSON[echo](t.Context(), c, ep) }},
+		{http.MethodPatch, epIn, func(c *Client, ep string) (echo, error) { return PatchJSON[echo](t.Context(), c, ep, inPayload) }},
+		{http.MethodPost, epIn, func(c *Client, ep string) (echo, error) { return PostJSON[echo](t.Context(), c, ep, inPayload) }},
+		{http.MethodPut, epIn, func(c *Client, ep string) (echo, error) { return PutJSON[echo](t.Context(), c, ep, inPayload) }},
+		{http.MethodOptions, epURL, func(c *Client, ep string) (echo, error) {
+			return DoJSON[echo](t.Context(), c, http.MethodOptions, ep, nil)
+		}},
+	}
 	for _, ts := range startServers(t, echoMux()) {
-		t.Run(ts.name, func(t *testing.T) {
-			c := newTestConnection(t, ts)
-			var h http.Header
-			if err := c.HeadJSON(epURL, &h); err != nil {
-				t.Fatalf("HeadJSON: %v", err)
+		c := newTestClient(t, ts)
+		for _, tt := range tests {
+			t.Run(ts.name+"/"+tt.method, func(t *testing.T) {
+				got, err := tt.call(c, tt.ep)
+				if err == nil && got.Header.Get("Accept") != "application/json" {
+					t.Errorf("Accept = %q, want application/json", got.Header.Get("Accept"))
+				}
+				checkEcho(t, ts.protocol, tt.method, got, err)
+
+				got, err = tt.call(c, ep404)
+				check404(t, err)
+				if !reflect.DeepEqual(got, echo{}) {
+					t.Errorf("expected zero value on error, got %+v", got)
+				}
+
+				got, err = tt.call(c, epJSON)
+				if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
+					t.Errorf("expected *json.SyntaxError, got %T: %v", err, err)
+				}
+				if err != nil && strings.Contains(err.Error(), "?") {
+					t.Errorf("decode error leaks the query string: %q", err.Error())
+				}
+				if !reflect.DeepEqual(got, echo{}) {
+					t.Errorf("expected zero value on error, got %+v", got)
+				}
+
+				got, err = tt.call(c, epNone)
+				if err != nil || !reflect.DeepEqual(got, echo{}) {
+					t.Errorf("empty body: got %+v, %v, want zero value and nil", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDoJSON_Body(t *testing.T) {
+	ts := startServers(t, echoMux())[0]
+	c := newTestClient(t, ts)
+	tests := []struct {
+		name string
+		in   any
+	}{
+		{"struct", inPayload},
+		{"pointer", &inPayload},
+		{"map", map[string]any{"stringdata": "hello", "intdata": 42, "booldata": true}},
+		{"bytes", inData},
+		{"raw message", json.RawMessage(inData)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PostJSON[echo](t.Context(), c, epIn, tt.in)
+			if err == nil && got.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got.Header.Get("Content-Type"))
 			}
-			checkHeadHeader(t, h)
+			checkEcho(t, ts.protocol, http.MethodPost, got, err)
 		})
 	}
+
+	t.Run("unencodable", func(t *testing.T) {
+		if _, err := PostJSON[echo](t.Context(), c, epIn, make(chan int)); err == nil {
+			t.Error("expected encoding error, got nil")
+		}
+	})
+
+	t.Run("configured content type wins", func(t *testing.T) {
+		c := newTestClient(t, ts, WithHeader("Content-Type", "application/vnd.test+json"))
+		got, err := PostJSON[echo](t.Context(), c, epIn, inPayload)
+		if err != nil {
+			t.Fatalf("PostJSON: %v", err)
+		}
+		if ct := got.Header.Get("Content-Type"); ct != "application/vnd.test+json" {
+			t.Errorf("Content-Type = %q, want %q", ct, "application/vnd.test+json")
+		}
+	})
 }
 
-func TestStatusError_Body(t *testing.T) {
+func TestHeaders(t *testing.T) {
 	ts := startServers(t, echoMux())[0]
-	c := newTestConnection(t, ts)
-	raw, err := c.Get(ep404)
-	check404(t, err)
-	var se *StatusError
-	if errors.As(err, &se) && string(se.Body) != string(raw) {
-		t.Errorf("StatusError.Body = %q, want %q", se.Body, raw)
+	c := newTestClient(t, ts,
+		WithHeader("X-Multi", "a"),
+		WithHeader("x-multi", "b"),
+		WithHeader("Host", "api.example.com"),
+	)
+	got, err := GetJSON[echo](t.Context(), c, epURL)
+	if err != nil {
+		t.Fatalf("GetJSON: %v", err)
 	}
-	if len(raw) == 0 {
-		t.Error("expected response body for 404, got none")
+	if v := got.Header.Values("X-Multi"); !reflect.DeepEqual(v, []string{"a", "b"}) {
+		t.Errorf("X-Multi = %q, want [a b]", v)
+	}
+
+	req, err := c.NewRequest(t.Context(), http.MethodGet, "test", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if req.Host != "api.example.com" {
+		t.Errorf("Host = %q, want %q", req.Host, "api.example.com")
+	}
+	if want := ts.server.URL + "/base/test"; req.URL.String() != want {
+		t.Errorf("URL = %q, want %q", req.URL, want)
+	}
+	// Modifying the request must not modify the client.
+	req.Header.Add("X-Multi", "c")
+	req2, _ := c.NewRequest(t.Context(), http.MethodGet, "", nil)
+	if v := req2.Header.Values("X-Multi"); len(v) != 2 {
+		t.Errorf("client headers were modified through a request: %q", v)
 	}
 }
 
-func TestCredentialsSpecialCharacters(t *testing.T) {
-	const user, password = "us@er", "p@ss:w/o#rd?%"
+func TestBasicAuth(t *testing.T) {
 	type auth struct {
 		user, password string
 		ok             bool
@@ -435,24 +506,87 @@ func TestCredentialsSpecialCharacters(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
 		got <- auth{u, p, ok}
-		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(s.Close)
-	addr := s.Listener.Addr().(*net.TCPAddr)
+	host := strings.TrimPrefix(s.URL, "http://")
 
-	c, err := NewConnection(false, addr.IP.String(), addr.Port, "", user, password, true, "", false, nil, testTimeout)
-	if err != nil {
-		t.Fatalf("NewConnection: %v", err)
+	tests := []struct {
+		name    string
+		baseURL string
+		opts    []Option
+		want    auth
+	}{
+		{"none", s.URL, nil, auth{}},
+		{"option", s.URL, []Option{WithBasicAuth("us@er", "p@ss:w/o#rd?%")}, auth{"us@er", "p@ss:w/o#rd?%", true}},
+		{"url", "http://admin:p%40ss@" + host, nil, auth{"admin", "p@ss", true}},
+		{"option overrides url", "http://admin:p%40ss@" + host, []Option{WithBasicAuth("other", "pw")}, auth{"other", "pw", true}},
 	}
-	t.Cleanup(c.Client.CloseIdleConnections)
-	if _, err := c.Get("/"); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	a := <-got
-	if !a.ok || a.user != user || a.password != password {
-		t.Errorf("basic auth = %q/%q (ok=%v), want %q/%q", a.user, a.password, a.ok, user, password)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := New(tt.baseURL, tt.opts...)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(c.HTTPClient().CloseIdleConnections)
+			if strings.Contains(c.BaseURL(), "@") {
+				t.Errorf("BaseURL() contains credentials: %q", c.BaseURL())
+			}
+			if _, err := c.Get(t.Context(), "/"); err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if a := <-got; a != tt.want {
+				t.Errorf("basic auth = %+v, want %+v", a, tt.want)
+			}
+		})
 	}
 }
+
+func TestTLSVerification(t *testing.T) {
+	ts := startServers(t, echoMux())[1]
+
+	c, err := New(ts.server.URL + "/base")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Get(t.Context(), epURL); err == nil {
+		t.Error("expected certificate error with default TLS config, got nil")
+	}
+
+	c, err = New(ts.server.URL+"/base", WithInsecureSkipVerify())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(c.HTTPClient().CloseIdleConnections)
+	if _, err := c.Get(t.Context(), epURL); err != nil {
+		t.Errorf("WithInsecureSkipVerify: %v", err)
+	}
+	// TLS config with the test CA is covered by all https tests via newTestClient.
+}
+
+func TestWithHTTPClient(t *testing.T) {
+	ts := startServers(t, echoMux())[0]
+	var calls atomic.Int32
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	c, err := New(ts.server.URL+"/base", WithHTTPClient(hc), WithHeader("test-header", "test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.HTTPClient() != hc {
+		t.Error("HTTPClient() does not return the configured client")
+	}
+	got, err := GetJSON[echo](t.Context(), c, epURL)
+	checkEcho(t, ts.protocol, http.MethodGet, got, err)
+	if calls.Load() != 1 {
+		t.Errorf("custom client was called %d times, want 1", calls.Load())
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestIPv6(t *testing.T) {
 	ln, err := net.Listen("tcp", "[::1]:0")
@@ -464,25 +598,26 @@ func TestIPv6(t *testing.T) {
 	s.Listener = ln
 	s.Start()
 	t.Cleanup(s.Close)
-	port := ln.Addr().(*net.TCPAddr).Port
 
-	for _, host := range []string{"::1", "[::1]"} {
-		t.Run(host, func(t *testing.T) {
-			c, err := NewConnection(false, host, port, "/base", "", "", true, "", false, testHeaders(), testTimeout)
-			if err != nil {
-				t.Fatalf("NewConnection: %v", err)
-			}
-			t.Cleanup(c.Client.CloseIdleConnections)
-			var data returnData
-			err = c.GetJSON(epURL, &data)
-			checkData(t, "http", http.MethodGet, data, err)
-		})
+	c := newTestClient(t, testServer{"ipv6", "http", s})
+	got, err := GetJSON[echo](t.Context(), c, epURL)
+	checkEcho(t, "http", http.MethodGet, got, err)
+}
+
+func TestMaxResponseSize(t *testing.T) {
+	ts := startServers(t, echoMux())[0]
+	c := newTestClient(t, ts, WithMaxResponseSize(10))
+	if _, err := c.Get(t.Context(), epURL); !errors.Is(err, ErrResponseTooLarge) {
+		t.Errorf("expected ErrResponseTooLarge, got %v", err)
 	}
+	c = newTestClient(t, ts, WithMaxResponseSize(10_000))
+	raw, err := c.Get(t.Context(), epURL)
+	checkRaw(t, ts.protocol, http.MethodGet, raw, err)
 }
 
 // blockingServer returns a server whose handler blocks until the request is
 // cancelled or the test ends.
-func blockingServer(t *testing.T) (host string, port int) {
+func blockingServer(t *testing.T) string {
 	t.Helper()
 	release := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -493,36 +628,31 @@ func blockingServer(t *testing.T) (host string, port int) {
 	}))
 	t.Cleanup(s.Close)
 	t.Cleanup(func() { close(release) }) // runs before s.Close
-	addr := s.Listener.Addr().(*net.TCPAddr)
-	return addr.IP.String(), addr.Port
+	return s.URL
 }
 
 func TestTimeout(t *testing.T) {
-	host, port := blockingServer(t)
-	c, err := NewConnection(false, host, port, "", "", "", true, "", false, nil, 50*time.Millisecond)
+	c, err := New(blockingServer(t), WithTimeout(50*time.Millisecond))
 	if err != nil {
-		t.Fatalf("NewConnection: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	_, err = c.Get("/")
-	var ne net.Error
-	if !errors.As(err, &ne) || !ne.Timeout() {
+	_, err = c.Get(t.Context(), "/")
+	if ne, ok := errors.AsType[net.Error](err); !ok || !ne.Timeout() {
 		t.Errorf("expected timeout error, got %v", err)
 	}
 }
 
 func TestContext(t *testing.T) {
-	host, port := blockingServer(t)
-	c, err := NewConnection(false, host, port, "", "", "", true, "", false, nil, testTimeout)
+	c, err := New(blockingServer(t))
 	if err != nil {
-		t.Fatalf("NewConnection: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(c.Client.CloseIdleConnections)
+	t.Cleanup(c.HTTPClient().CloseIdleConnections)
 
 	t.Run("deadline", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
-		_, err := c.GetContext(ctx, "/")
-		if !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := GetJSON[echo](ctx, c, "/"); !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("expected context.DeadlineExceeded, got %v", err)
 		}
 	})
@@ -530,52 +660,37 @@ func TestContext(t *testing.T) {
 	t.Run("cancelled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		calls := map[string]func() error{
-			"ConnectJSONContext": func() error { return c.ConnectJSONContext(ctx, "/", &returnData{}) },
-			"DeleteJSONContext":  func() error { return c.DeleteJSONContext(ctx, "/", inData, &returnData{}) },
-			"GetJSONContext":     func() error { return c.GetJSONContext(ctx, "/", &returnData{}) },
-			"HeadJSONContext":    func() error { return c.HeadJSONContext(ctx, "/", &http.Header{}) },
-			"OptionsJSONContext": func() error { return c.OptionsJSONContext(ctx, "/", &returnData{}) },
-			"PatchJSONContext":   func() error { return c.PatchJSONContext(ctx, "/", inData, &returnData{}) },
-			"PostJSONContext":    func() error { return c.PostJSONContext(ctx, "/", inData, &returnData{}) },
-			"PutJSONContext":     func() error { return c.PutJSONContext(ctx, "/", inData, &returnData{}) },
-			"TraceJSONContext":   func() error { return c.TraceJSONContext(ctx, "/", &returnData{}) },
-		}
-		for name, call := range calls {
-			if err := call(); !errors.Is(err, context.Canceled) {
-				t.Errorf("%s: expected context.Canceled, got %v", name, err)
-			}
+		if _, err := c.Post(ctx, "/", inData); !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
 		}
 	})
 }
 
 func TestRequestErrors(t *testing.T) {
-	t.Run("invalid endpoint", func(t *testing.T) {
-		c, err := NewConnection(false, "localhost", 80, "", "", "", true, "", false, nil, testTimeout)
-		if err != nil {
-			t.Fatalf("NewConnection: %v", err)
-		}
-		if _, err := c.Get("/\x7f"); err == nil {
-			t.Error("expected error for invalid URL, got nil")
-		}
-	})
+	c, err := New("http://localhost")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Get(t.Context(), "/\x7f"); err == nil {
+		t.Error("invalid endpoint: expected error, got nil")
+	}
+	if _, err := c.Head(t.Context(), "/\x7f"); err == nil {
+		t.Error("invalid endpoint: expected error, got nil")
+	}
 
-	t.Run("connection refused", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := ln.Addr().(*net.TCPAddr).Port
-		_ = ln.Close()
-		c, err := NewConnection(false, "127.0.0.1", port, "", "", "", true, "", false, nil, testTimeout)
-		if err != nil {
-			t.Fatalf("NewConnection: %v", err)
-		}
-		var data returnData
-		if err := c.GetJSON("/", &data); err == nil {
-			t.Error("expected connection error, got nil")
-		}
-	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	c, err = New("http://"+addr, WithoutProxy())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := GetJSON[echo](t.Context(), c, "/"); err == nil {
+		t.Error("connection refused: expected error, got nil")
+	}
 }
 
 func TestHTTPProxy(t *testing.T) {
@@ -587,27 +702,20 @@ func TestHTTPProxy(t *testing.T) {
 	}))
 	t.Cleanup(p.Close)
 
-	for name, proxyAddr := range map[string]string{
-		"url":            p.URL,
-		"without scheme": strings.TrimPrefix(p.URL, "http://"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			c, err := NewConnection(false, "target.example.invalid", 8080, "/base", "", "", true, proxyAddr, false, nil, testTimeout)
-			if err != nil {
-				t.Fatalf("NewConnection: %v", err)
-			}
-			t.Cleanup(c.Client.CloseIdleConnections)
-			var data returnData
-			if err := c.GetJSON("/test", &data); err != nil {
-				t.Fatalf("GetJSON: %v", err)
-			}
-			if want := "http://target.example.invalid:8080/base/test"; <-got != want {
-				t.Errorf("proxy did not receive request for %q", want)
-			}
-			if data.Method != http.MethodGet {
-				t.Errorf("Method = %q, want %q", data.Method, http.MethodGet)
-			}
-		})
+	c, err := New("http://target.example.invalid:8080/base", WithProxy(p.URL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(c.HTTPClient().CloseIdleConnections)
+	data, err := GetJSON[echo](t.Context(), c, "/test")
+	if err != nil {
+		t.Fatalf("GetJSON: %v", err)
+	}
+	if want := "http://target.example.invalid:8080/base/test"; <-got != want {
+		t.Errorf("proxy did not receive request for %q", want)
+	}
+	if data.Method != http.MethodGet {
+		t.Errorf("Method = %q, want %q", data.Method, http.MethodGet)
 	}
 }
 
@@ -693,23 +801,15 @@ func serveSOCKS5(c net.Conn) {
 	_, _ = io.Copy(c, target)
 }
 
-func TestSocksProxy(t *testing.T) {
+func TestSOCKS5Proxy(t *testing.T) {
 	socksAddr, count := startSOCKS5(t)
 	for _, ts := range startServers(t, echoMux()) {
-		for name, proxyAddr := range map[string]string{
-			"host:port": socksAddr,
-			"url":       "socks5://" + socksAddr,
-		} {
-			t.Run(ts.name+"/"+name, func(t *testing.T) {
+		for _, scheme := range []string{"socks5", "socks5h"} {
+			t.Run(ts.name+"/"+scheme, func(t *testing.T) {
 				before := count.Load()
-				c, err := NewConnection(ts.ssl, ts.host, ts.port, "/base", "", "", false, proxyAddr, true, testHeaders(), testTimeout)
-				if err != nil {
-					t.Fatalf("NewConnection: %v", err)
-				}
-				t.Cleanup(c.Client.CloseIdleConnections)
-				var data returnData
-				err = c.GetJSON(epURL, &data)
-				checkData(t, ts.protocol, http.MethodGet, data, err)
+				c := newTestClient(t, ts, WithProxy(scheme+"://"+socksAddr))
+				got, err := GetJSON[echo](t.Context(), c, epURL)
+				checkEcho(t, ts.protocol, http.MethodGet, got, err)
 				if count.Load() == before {
 					t.Error("request did not go through the SOCKS5 proxy")
 				}
