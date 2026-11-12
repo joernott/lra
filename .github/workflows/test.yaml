@@ -5,43 +5,70 @@ on:
   push: {}
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
+env:
+  # Test with exactly the Go version from the matrix instead of letting the
+  # go command download the toolchain required by go.mod.
+  GOTOOLCHAIN: local
+
 jobs:
-  build:
-    runs-on: 'ubuntu-latest'
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  test:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         go:
-            - '1.21.x'
-            - '1.22.x'
-            - '1.23.x'
-            - 'stable'
+          - oldstable
+          - stable
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go ${{ matrix.go }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
 
-
       - name: Unit Test
         run: |
-          go get -v .
-          go test -v -cover -coverprofile=coverage.out
+          go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
           go tool cover -html=coverage.out -o coverage.html
 
       - name: Upload Coverage Report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.go }}
           path: |
             coverage.out
             coverage.html
 
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v7
+        if: matrix.go == 'stable'
         with:
-            files: ./coverage.out
-            token: ${{ secrets.CODECOV_TOKEN }}
-            verbose: true
+          files: ./coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
